@@ -359,18 +359,17 @@ async function startServer() {
 
         if (isRtmp) {
           inputArgs = [
-            "-thread_queue_size", "2048",
-            "-use_wallclock_as_timestamps", "1",
+            "-thread_queue_size", "4096",
             "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
-            "-analyzeduration", "500000", 
-            "-probesize", "500000", 
+            "-analyzeduration", "1000000", 
+            "-probesize", "1000000", 
             "-i", cam.rtsp_url
           ];
         } else {
           inputArgs = [
-            "-thread_queue_size", "2048",
+            "-thread_queue_size", "4096",
             "-rtsp_transport", "tcp", 
-            "-use_wallclock_as_timestamps", "1",
+            "-max_delay", "500000",
             "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
             "-analyzeduration", "1000000", 
             "-probesize", "1000000", 
@@ -380,7 +379,11 @@ async function startServer() {
 
         if (hasAudio) {
           addLog("Áudio detectado na câmera! Transmitindo áudio nativo da câmera com resincronização aresample.\n");
-          mappingArgs = ["-map", "0:v:0", "-map", "0:a:0", "-af", "aresample=async=1000:min_hard_comp=0.100000:first_pts=0"];
+          mappingArgs = [
+            "-map", "0:v:0", 
+            "-map", "0:a:0", 
+            "-af", "aresample=async=1000:min_hard_comp=0.100000"
+          ];
         } else {
           addLog("Nenhum canal de áudio na câmera. Utilizando faixa de áudio nulo para o YouTube.\n");
           inputArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100");
@@ -460,13 +463,11 @@ async function startServer() {
         ...inputArgs,
         "-vf", vfFilters,
         "-c:v", "libx264",
-        "-preset", "superfast", // Superfast preset for fast encoding and low latency
-        "-tune", "zerolatency",
-        "-profile:v", "high", // High profile for 1080p stream
+        "-preset", "superfast", // Superfast preset for optimal CPU usage and stability
+        "-profile:v", "high",
         "-level", "4.1",
         "-pix_fmt", "yuv420p",
         "-r", "30",
-        "-vsync", "1", // Force constant 30fps stream output
         "-g", "60",
         "-keyint_min", "60",
         "-sc_threshold", "0", 
@@ -476,13 +477,13 @@ async function startServer() {
         "-c:a", "aac",
         "-b:a", "160k", // High quality 160k audio
         "-ar", "44100",
-        "-async", "1", // Sync audio with video frame generation
+        "-ac", "2", // Guarantee stereo audio channels for YouTube
         ...mappingArgs,
         "-f", "flv",
         "-flvflags", "no_duration_filesize",
-        "-rtmp_buffer", "1000",
+        "-rtmp_buffer", "2000",
         "-rtmp_live", "live",
-        "-max_muxing_queue_size", "2048",
+        "-max_muxing_queue_size", "4096",
         "-threads", "0",
         rtmpUrl
       ];
@@ -781,21 +782,25 @@ async function startServer() {
       "Pragma": "no-cache"
     });
 
+    const isPreview = req.query.quality === "preview";
+    const scaleFilter = isPreview ? "scale=640:-1" : "scale=1280:-1";
+    const fpsRate = isPreview ? "15" : "30";
+    const qualityVal = isPreview ? "6" : "3";
+
     const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
     const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp"];
 
     const args = [
       "-thread_queue_size", "2048",
       ...transportOpts,
-      "-use_wallclock_as_timestamps", "1",
-      "-probesize", "500000",
-      "-analyzeduration", "500000",
+      "-probesize", "300000",
+      "-analyzeduration", "300000",
       "-i", cam.rtsp_url,
-      "-r", "30",
-      "-vf", "scale=1280:-1",
+      "-r", fpsRate,
+      "-vf", scaleFilter,
       "-an",
       "-c:v", "mjpeg",
-      "-q:v", "3",
+      "-q:v", qualityVal,
       "-f", "mpjpeg",
       "-boundary_tag", "ffmpeg",
       "-"
@@ -805,7 +810,9 @@ async function startServer() {
     ff.stdout.pipe(res);
 
     req.on("close", () => {
-      ff.kill("SIGKILL");
+      try {
+        ff.kill("SIGKILL");
+      } catch (e) {}
     });
   });
 
@@ -1005,10 +1012,10 @@ async function startServer() {
     res.json({ success: true, status: db.stream_status });
   });
 
-  app.post("/api/stream/switch", authenticate, async (req, res) => {
+  app.post("/api/stream/switch", authenticate, (req, res) => {
     const { type, id } = req.body;
-    await startStream(type, id);
-    res.json({ success: true });
+    res.json({ success: true, message: "Troca de transmissão solicitada" });
+    startStream(type, id);
   });
 
   app.post("/api/stream/stop", authenticate, (req, res) => {

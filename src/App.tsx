@@ -35,11 +35,11 @@ interface StreamStatus {
   timer_running?: boolean;
 }
 
-const CameraPreview = ({ camId, className = '', isLive = true }: { camId: number, className?: string, isLive?: boolean, key?: string | number }) => {
+const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
   const [useMjpeg, setUseMjpeg] = useState(isLive);
   const [displayedSrc, setDisplayedSrc] = useState<string>(
-    isLive ? `/api/cameras/${camId}/mjpeg?token=${token}&t=${Date.now()}` : `/api/cameras/${camId}/snapshot?token=${token}&t=${Date.now()}`
+    isLive ? `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&t=${Date.now()}` : `/api/cameras/${camId}/snapshot?token=${token}&t=${Date.now()}`
   );
   const [error, setError] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -50,7 +50,7 @@ const CameraPreview = ({ camId, className = '', isLive = true }: { camId: number
 
   useEffect(() => {
     if (useMjpeg) {
-      setDisplayedSrc(`/api/cameras/${camId}/mjpeg?token=${token}&t=${Date.now()}`);
+      setDisplayedSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&t=${Date.now()}`);
       setLoading(false);
       setError(false);
       return;
@@ -85,7 +85,7 @@ const CameraPreview = ({ camId, className = '', isLive = true }: { camId: number
       active = false;
       clearInterval(interval);
     };
-  }, [camId, token, isLive, useMjpeg]);
+  }, [camId, token, isLive, useMjpeg, quality]);
 
   if (useMjpeg) {
     return (
@@ -372,9 +372,9 @@ export default function App() {
     if (isLoggedIn) {
       fetchData();
       
-      // Initialize socket with both polling and websocket fallback for supreme compatibility and zero dropouts
+      // Initialize socket with websocket prioritized for zero dropouts and instant response
       const socket = io(window.location.origin, {
-        transports: ['polling', 'websocket'],
+        transports: ['websocket', 'polling'],
         reconnection: true,
         reconnectionAttempts: Infinity,
         reconnectionDelay: 1000,
@@ -1374,7 +1374,7 @@ export default function App() {
                           </div>
                         ) : status.current_source_type === 'camera' ? (
                           <div className="w-full h-full relative">
-                            <CameraPreview key={`main-cam-${status.current_source_id}`} camId={status.current_source_id as number} className="w-full h-full object-contain" isLive={true} />
+                            <CameraPreview key={`main-cam-${status.current_source_id}`} camId={status.current_source_id as number} className="w-full h-full object-contain" isLive={true} quality="high" />
                             <div className="absolute inset-0 bg-black/20 pointer-events-none" />
                             <div className="absolute bottom-4 left-4 flex items-center gap-2">
                               <Activity className="w-4 h-4 text-emerald-500 animate-pulse" />
@@ -1454,7 +1454,7 @@ export default function App() {
                   {cameras.map(cam => (
                     <div key={cam.id} className={`bg-[#151619] rounded-2xl border transition-all overflow-hidden group ${status?.current_source_id === cam.id && status.current_source_type === 'camera' ? 'border-emerald-500 shadow-lg shadow-emerald-500/10' : 'border-white/10 hover:border-white/20'}`}>
                       <div className="aspect-video bg-black/40 relative">
-                        <CameraPreview key={`dash-cam-${cam.id}`} camId={cam.id} className="w-full h-full opacity-40 group-hover:opacity-60 transition-opacity" isLive={true} />
+                        <CameraPreview key={`dash-cam-${cam.id}`} camId={cam.id} className="w-full h-full opacity-40 group-hover:opacity-60 transition-opacity" isLive={true} quality="preview" />
                         <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/60">
                           <button 
                             onClick={() => switchStream('camera', cam.id)}
