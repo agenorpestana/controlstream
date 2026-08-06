@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix StreamControl",
+  "description": "Web-based live streaming control panel for managing IP cameras, commercials, and YouTube Live broadcasts.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
