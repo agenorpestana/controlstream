@@ -37,16 +37,16 @@ interface StreamStatus {
 
 const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
-  const [useMjpeg, setUseMjpeg] = useState(isLive);
-  const [displayedSrc, setDisplayedSrc] = useState<string>(
-    isLive ? `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&t=${Date.now()}` : `/api/cameras/${camId}/snapshot?token=${token}&t=${Date.now()}`
-  );
+  // Only use persistent MJPEG stream for high quality main player!
+  // Thumbnails (quality='preview') MUST use snapshot polling to prevent filling browser HTTP connection pool
+  const [useMjpeg, setUseMjpeg] = useState(quality === 'high' && isLive);
+  const [displayedSrc, setDisplayedSrc] = useState<string>('');
   const [error, setError] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    setUseMjpeg(isLive);
-  }, [camId, isLive]);
+    setUseMjpeg(quality === 'high' && isLive);
+  }, [camId, isLive, quality]);
 
   useEffect(() => {
     if (useMjpeg) {
@@ -57,11 +57,16 @@ const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' 
     }
 
     let active = true;
+    let isFetching = false;
+
     const fetchNextFrame = () => {
-      if (!active) return;
+      if (!active || isFetching) return;
+      isFetching = true;
+
       const url = `/api/cameras/${camId}/snapshot?token=${token}&t=${Date.now()}`;
       const img = new Image();
       img.onload = () => {
+        isFetching = false;
         if (active) {
           setDisplayedSrc(url);
           setLoading(false);
@@ -69,6 +74,7 @@ const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' 
         }
       };
       img.onerror = () => {
+        isFetching = false;
         if (active) {
           setError(true);
           setLoading(false);
@@ -78,7 +84,7 @@ const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' 
     };
 
     fetchNextFrame();
-    const intervalTime = isLive ? 100 : 1000;
+    const intervalTime = quality === 'preview' ? 1200 : 600;
     const interval = setInterval(fetchNextFrame, intervalTime);
 
     return () => {
@@ -96,9 +102,8 @@ const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' 
           alt="Live Camera Stream"
           className="w-full h-full object-contain"
           onError={() => {
-            // Reconnect to 30fps MJPEG stream automatically after a brief moment
             setUseMjpeg(false);
-            setTimeout(() => setUseMjpeg(true), 1500);
+            setTimeout(() => setUseMjpeg(quality === 'high' && isLive), 2000);
           }}
         />
       </div>
@@ -107,20 +112,20 @@ const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' 
 
   return (
     <div className={`relative bg-black/40 overflow-hidden ${className}`}>
-      {loading && (
+      {loading && !displayedSrc && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/60 z-10">
           <Activity className="w-4 h-4 text-emerald-500 animate-pulse" />
         </div>
       )}
       
-      {error ? (
+      {error && !displayedSrc ? (
         <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center">
-          <p className="text-red-400 text-[10px] font-bold uppercase mb-2">Erro de Conexão</p>
+          <p className="text-red-400 text-[10px] font-bold uppercase mb-2">Sem Sinal</p>
           <button 
             onClick={() => {
               setError(false);
               setLoading(true);
-              setUseMjpeg(isLive);
+              setUseMjpeg(quality === 'high' && isLive);
             }}
             className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors"
           >
@@ -129,10 +134,10 @@ const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' 
         </div>
       ) : (
         <img 
-          key={`${camId}-${displayedSrc}`}
-          src={displayedSrc} 
+          src={displayedSrc || `/api/cameras/${camId}/snapshot?token=${token}`} 
           alt="Preview"
           className="w-full h-full object-contain"
+          onError={() => setError(true)}
         />
       )}
     </div>

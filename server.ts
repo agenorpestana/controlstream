@@ -823,11 +823,21 @@ async function startServer() {
     const ff = spawn("ffmpeg", args);
     ff.stdout.pipe(res);
 
-    req.on("close", () => {
+    let killed = false;
+    const cleanup = () => {
+      if (killed) return;
+      killed = true;
       try {
+        ff.stdout.unpipe(res);
         ff.kill("SIGKILL");
       } catch (e) {}
-    });
+    };
+
+    req.on("close", cleanup);
+    req.on("aborted", cleanup);
+    res.on("close", cleanup);
+    res.on("finish", cleanup);
+    ff.on("close", () => { killed = true; });
   });
 
   app.post("/api/cameras", authenticate, (req, res) => {

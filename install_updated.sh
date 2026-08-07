@@ -37,6 +37,13 @@ echo "4) ITL Cursos (Porta 3003)"
 echo "5) Rastreae (Porta 3002)"
 echo "6) iWedding SaaS (Porta 3005)"
 echo "7) StreamControl (Porta 3006)"
+echo "8) Unity DVR (Porta 3007)"
+echo "9) Unity Tax Manager (Porta 3008)"
+echo "10) VooSimples (Porta 3009)"
+echo "11) Unity Comprovantes (Porta 3010)"
+echo "12) Bolão da Copa - Provedor ISP (Porta 3011)"
+echo "13) Central de Câmeras SNRD (Porta 3012)"
+echo "14) Central ITL de Câmeras & Segurança (Porta 3013)"
 read SYSTEM_CHOICE
 
 case $SYSTEM_CHOICE in
@@ -94,6 +101,62 @@ case $SYSTEM_CHOICE in
     PM2_PREFIX="streamcontrol-api"
     DEFAULT_DB_NAME="streamcontrol"
     DEFAULT_DB_USER="stream_user"
+    IS_CATEQUESE=0
+    ;;
+  8)
+    SYSTEM_NAME="Unity DVR"
+    APP_PORT=3007
+    PM2_PREFIX="unity-dvr-api"
+    DEFAULT_DB_NAME="unity_dvr"
+    DEFAULT_DB_USER="dvr_user"
+    IS_CATEQUESE=0
+    ;;
+  9)
+    SYSTEM_NAME="Unity Tax Manager"
+    APP_PORT=3008
+    PM2_PREFIX="unity-tax-api"
+    DEFAULT_DB_NAME="unity_tax_db"
+    DEFAULT_DB_USER="tax_user"
+    IS_CATEQUESE=0
+    ;;
+  10)
+    SYSTEM_NAME="VooSimples"
+    APP_PORT=3009
+    PM2_PREFIX="voosimples-api"
+    DEFAULT_DB_NAME="voosimples_db"
+    DEFAULT_DB_USER="voos_user"
+    IS_CATEQUESE=0
+    ;;
+  11)
+    SYSTEM_NAME="Unity Comprovantes"
+    APP_PORT=3010
+    PM2_PREFIX="unity-comprovantes-api"
+    DEFAULT_DB_NAME="unity_comprovantes"
+    DEFAULT_DB_USER="comprovantes_user"
+    IS_CATEQUESE=0
+    ;;
+  12)
+    SYSTEM_NAME="Bolão da Copa - Provedor ISP"
+    APP_PORT=3011
+    PM2_PREFIX="bolao-copa-api"
+    DEFAULT_DB_NAME="copa_bolao_db"
+    DEFAULT_DB_USER="copa_user"
+    IS_CATEQUESE=0
+    ;;
+  13)
+    SYSTEM_NAME="Central de Câmeras SNRD"
+    APP_PORT=3012
+    PM2_PREFIX="snrd-cameras-api"
+    DEFAULT_DB_NAME="snrd_cameras"
+    DEFAULT_DB_USER="snrd_user"
+    IS_CATEQUESE=0
+    ;;
+  14)
+    SYSTEM_NAME="Central ITL de Câmeras & Segurança"
+    APP_PORT=3013
+    PM2_PREFIX="itl-cameras-api"
+    DEFAULT_DB_NAME="itl_cameras"
+    DEFAULT_DB_USER="itl_user"
     IS_CATEQUESE=0
     ;;
   *)
@@ -272,11 +335,56 @@ EOL
     fi
 fi
 
-# Desativar módulo rtmp padrão do Nginx se existir para evitar conflito de porta 1935
-if [ -f /etc/nginx/modules-enabled/50-mod-rtmp.conf ]; then
-    echo -e "${YELLOW}Removendo conflito de porta 1935 do módulo Nginx RTMP...${NC}"
-    rm -f /etc/nginx/modules-enabled/50-mod-rtmp.conf /etc/nginx/modules-enabled/*rtmp*
+# Desativar módulo rtmp padrão do Nginx se existir para evitar conflito de porta 1935 e "unknown directive rtmp"
+echo -e "${YELLOW}Limpando possíveis conflitos de RTMP no Nginx...${NC}"
+rm -f /etc/nginx/modules-enabled/50-mod-rtmp.conf /etc/nginx/modules-enabled/*rtmp* 2>/dev/null
+
+# Limpar bloco rtmp do nginx.conf utilizando Python para tratar chaves aninhadas sem corromper a sintaxe
+python3 -c '
+import re, os
+config_file = "/etc/nginx/nginx.conf"
+if os.path.exists(config_file):
+    with open(config_file, "r") as f:
+        content = f.read()
+    
+    # Remover bloco rtmp completo balanceando chaves
+    while "rtmp {" in content:
+        start = content.find("rtmp {")
+        depth = 0
+        end = -1
+        for i in range(start, len(content)):
+            if content[i] == "{":
+                depth += 1
+            elif content[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end != -1:
+            content = content[:start] + content[end:]
+        else:
+            break
+
+    # Se houver chaves soltas do sed anterior perto do final ou linhas vazias duplicadas
+    lines = content.splitlines()
+    clean_lines = []
+    for line in lines:
+        if line.strip() == "}" and len(clean_lines) > 0 and clean_lines[-1].strip() == "}":
+            # Evitar fechamentos dupes órfãos no escopo global
+            continue
+        clean_lines.append(line)
+    
+    with open(config_file, "w") as f:
+        f.write("\n".join(clean_lines) + "\n")
+' 2>/dev/null
+
+# Se o nginx.conf estiver corrompido, restaurar backup original se existir
+if ! nginx -t 2>/dev/null; then
+    if [ -f /etc/nginx/nginx.conf.bak_rtmp ]; then
+        cp /etc/nginx/nginx.conf.bak_rtmp /etc/nginx/nginx.conf
+    fi
 fi
+
 
 # Nginx
 NGINX_CONF="/etc/nginx/sites-available/$DOMAIN"
