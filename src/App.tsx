@@ -35,143 +35,98 @@ interface StreamStatus {
   timer_running?: boolean;
 }
 
-const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
+const CameraPreview = ({ camId, className = '', quality = 'high' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
-  // Only use persistent MJPEG stream for high quality main player!
-  // Thumbnails (quality='preview') MUST use snapshot polling to prevent filling browser HTTP connection pool
-  const [useMjpeg, setUseMjpeg] = useState(quality === 'high' && isLive);
-  const [displayedSrc, setDisplayedSrc] = useState<string>('');
+  const [displayedSrc, setDisplayedSrc] = useState<string>(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}`);
   const [error, setError] = useState(false);
-  const [loading, setLoading] = useState(true);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
   useEffect(() => {
-    setUseMjpeg(quality === 'high' && isLive);
-  }, [camId, isLive, quality]);
+    // Generate a stable URL for the camera MJPEG stream
+    const url = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}`;
+    setDisplayedSrc(url);
+    setError(false);
 
-  // Cleanup image element explicitly to terminate TCP connection immediately when unmounting or switching cameras
-  useEffect(() => {
     return () => {
+      // ONLY clear src when switching camera ID/quality or unmounting
       if (imgRef.current) {
         imgRef.current.src = '';
         imgRef.current.removeAttribute('src');
       }
     };
-  }, [camId, useMjpeg]);
-
-  useEffect(() => {
-    if (useMjpeg) {
-      if (imgRef.current) {
-        imgRef.current.src = '';
-      }
-      setDisplayedSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&t=${Date.now()}`);
-      setLoading(false);
-      setError(false);
-      return () => {
-        if (imgRef.current) {
-          imgRef.current.src = '';
-          imgRef.current.removeAttribute('src');
-        }
-      };
-    }
-
-    let active = true;
-    let isFetching = false;
-    let currentImg: HTMLImageElement | null = null;
-
-    const fetchNextFrame = () => {
-      if (!active || isFetching) return;
-      isFetching = true;
-
-      const url = `/api/cameras/${camId}/snapshot?token=${token}&t=${Date.now()}`;
-      currentImg = new Image();
-      currentImg.onload = () => {
-        isFetching = false;
-        if (active) {
-          setDisplayedSrc(url);
-          setLoading(false);
-          setError(false);
-        }
-      };
-      currentImg.onerror = () => {
-        isFetching = false;
-        if (active) {
-          setError(true);
-          setLoading(false);
-        }
-      };
-      currentImg.src = url;
-    };
-
-    fetchNextFrame();
-    const intervalTime = quality === 'preview' ? 1200 : 600;
-    const interval = setInterval(fetchNextFrame, intervalTime);
-
-    return () => {
-      active = false;
-      clearInterval(interval);
-      if (currentImg) {
-        currentImg.onload = null;
-        currentImg.onerror = null;
-        currentImg.src = '';
-      }
-      if (imgRef.current) {
-        imgRef.current.src = '';
-        imgRef.current.removeAttribute('src');
-      }
-    };
-  }, [camId, token, isLive, useMjpeg, quality]);
-
-  if (useMjpeg) {
-    return (
-      <div className={`relative bg-black/40 overflow-hidden ${className}`}>
-        <img 
-          ref={imgRef}
-          key={`mjpeg-cam-${camId}`}
-          src={displayedSrc} 
-          alt="Live Camera Stream"
-          className="w-full h-full object-contain"
-          onError={() => {
-            setUseMjpeg(false);
-            setTimeout(() => setUseMjpeg(quality === 'high' && isLive), 2000);
-          }}
-        />
-      </div>
-    );
-  }
+  }, [camId, quality, token]);
 
   return (
     <div className={`relative bg-black/40 overflow-hidden ${className}`}>
-      {loading && !displayedSrc && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/60 z-10">
-          <Activity className="w-4 h-4 text-emerald-500 animate-pulse" />
-        </div>
-      )}
-      
-      {error && !displayedSrc ? (
-        <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center">
-          <p className="text-red-400 text-[10px] font-bold uppercase mb-2">Sem Sinal</p>
+      {error && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-black/80 z-10">
+          <p className="text-red-400 text-[10px] font-bold uppercase mb-2">Aguardando Câmera...</p>
           <button 
             onClick={() => {
               setError(false);
-              setLoading(true);
-              setUseMjpeg(quality === 'high' && isLive);
+              if (imgRef.current) {
+                imgRef.current.src = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&r=${Date.now()}`;
+              }
             }}
             className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors"
           >
-            <RefreshCw className="w-4 h-4 text-white" />
+            <RefreshCw className="w-4 h-4 text-white animate-spin" />
           </button>
         </div>
-      ) : (
-        <img 
-          ref={imgRef}
-          src={displayedSrc || `/api/cameras/${camId}/snapshot?token=${token}`} 
-          alt="Preview"
-          className="w-full h-full object-contain"
-          onError={() => setError(true)}
-        />
       )}
+      <img 
+        ref={imgRef}
+        key={`mjpeg-cam-${camId}-${quality}`}
+        src={displayedSrc} 
+        alt={`Camera ${camId}`}
+        className="w-full h-full object-contain"
+        onError={() => {
+          // Retry automatically after a short delay without breaking layout or resetting src continuously
+          setTimeout(() => {
+            if (imgRef.current) {
+              imgRef.current.src = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&retry=${Date.now()}`;
+            }
+          }, 2000);
+        }}
+      />
     </div>
+  );
+};
+
+const WebPreviewCanvas = ({ sourceCanvas }: { sourceCanvas: HTMLCanvasElement | null }) => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    let animId: number;
+    let active = true;
+
+    const render = () => {
+      if (!active) return;
+      const target = canvasRef.current;
+      if (target && sourceCanvas) {
+        const ctx = target.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(sourceCanvas, 0, 0, target.width, target.height);
+        }
+      }
+      animId = requestAnimationFrame(render);
+    };
+
+    render();
+
+    return () => {
+      active = false;
+      if (animId) cancelAnimationFrame(animId);
+    };
+  }, [sourceCanvas]);
+
+  return (
+    <canvas 
+      ref={canvasRef}
+      className="w-full h-full object-contain"
+      width={1280}
+      height={720}
+    />
   );
 };
 
@@ -1387,29 +1342,7 @@ export default function App() {
                         ) : status.current_source_type === 'web' ? (
                           <div className="w-full h-full flex flex-col items-center justify-center">
                             <div className="w-full h-full max-h-[90%] relative">
-                               <canvas 
-                                 id="dashboard-preview-canvas"
-                                 className="w-full h-full object-contain"
-                                 ref={(el) => {
-                                   if (el && canvasRef.current) {
-                                     const ctx = el.getContext('2d');
-                                     const sourceCanvas = canvasRef.current;
-                                     let active = true;
-                                     const render = () => {
-                                       if (!active) return;
-                                       if (ctx && sourceCanvas) {
-                                         ctx.drawImage(sourceCanvas, 0, 0, el.width, el.height);
-                                         requestAnimationFrame(render);
-                                       }
-                                     };
-                                     render();
-                                     // This is still a bit hacky but better with the 'active' flag if we could clean it up.
-                                     // In React, it's better to use a dedicated component for this.
-                                   }
-                                 }}
-                                 width={1280}
-                                 height={720}
-                               />
+                               <WebPreviewCanvas sourceCanvas={canvasRef.current} />
                             </div>
                             <p className="font-mono text-[10px] text-white/40 mt-2 uppercase tracking-widest">Transmissão Local Ativa</p>
                           </div>

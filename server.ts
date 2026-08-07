@@ -315,6 +315,7 @@ async function startServer() {
   let isStarting = false;
   let activeProbeProc: any = null;
   let activeHighQualityMjpegProc: any = null;
+  let activeHighQualityCamId: number | null = null;
 
   const startStream = async (type: "camera" | "video" | "web", id: number | string) => {
     // If a probe is already running, cancel it so the new request can execute immediately
@@ -831,10 +832,11 @@ async function startServer() {
 
     const isPreview = req.query.quality === "preview";
 
-    // Terminate any old active high-quality player stream to immediately release browser sockets and CPU
-    if (!isPreview && activeHighQualityMjpegProc) {
+    // Terminate old active high-quality stream ONLY if switching to a DIFFERENT camera ID
+    if (!isPreview && activeHighQualityMjpegProc && activeHighQualityCamId !== camId) {
       try { activeHighQualityMjpegProc.kill("SIGKILL"); } catch (e) {}
       activeHighQualityMjpegProc = null;
+      activeHighQualityCamId = null;
     }
 
     res.writeHead(200, {
@@ -846,26 +848,25 @@ async function startServer() {
     });
 
     const scaleFilter = isPreview ? "scale=480:-1" : "scale=960:-1";
-    const fpsRate = isPreview ? "12" : "25";
-    const qualityVal = isPreview ? "8" : "5";
+    const fpsRate = isPreview ? "15" : "25";
+    const qualityVal = isPreview ? "8" : "6";
 
     const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
     const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp"];
 
     const args = [
-      "-use_wallclock_as_timestamps", "1",
-      "-thread_queue_size", "4096",
-      "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
+      "-thread_queue_size", "2048",
+      "-fflags", "+genpts+igndts",
       ...transportOpts,
-      "-probesize", "500000",
-      "-analyzeduration", "500000",
+      "-probesize", "1000000",
+      "-analyzeduration", "1000000",
       "-i", cam.rtsp_url,
       "-r", fpsRate,
       "-vf", scaleFilter,
       "-an",
       "-c:v", "mjpeg",
       "-q:v", qualityVal,
-      "-flush_packets", "1",
+      "-g", "1",
       "-f", "mpjpeg",
       "-boundary_tag", "ffmpeg",
       "-"
@@ -874,6 +875,7 @@ async function startServer() {
     const ff = spawn("ffmpeg", args);
     if (!isPreview) {
       activeHighQualityMjpegProc = ff;
+      activeHighQualityCamId = camId;
     }
 
     ff.stdout.pipe(res);
@@ -884,6 +886,7 @@ async function startServer() {
       killed = true;
       if (activeHighQualityMjpegProc === ff) {
         activeHighQualityMjpegProc = null;
+        activeHighQualityCamId = null;
       }
       try {
         ff.stdout.unpipe(res);
@@ -907,7 +910,10 @@ async function startServer() {
     }
     ff.on("close", () => {
       killed = true;
-      if (activeHighQualityMjpegProc === ff) activeHighQualityMjpegProc = null;
+      if (activeHighQualityMjpegProc === ff) {
+        activeHighQualityMjpegProc = null;
+        activeHighQualityCamId = null;
+      }
     });
   });
 
