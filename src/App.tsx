@@ -37,14 +37,16 @@ interface StreamStatus {
 
 const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
-  const [useMjpeg, setUseMjpeg] = useState(isLive);
+  // Only use persistent MJPEG stream for high quality main player!
+  // Thumbnails (quality='preview') MUST use snapshot polling to prevent filling browser HTTP connection pool
+  const [useMjpeg, setUseMjpeg] = useState(quality === 'high' && isLive);
   const [displayedSrc, setDisplayedSrc] = useState<string>('');
   const [error, setError] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    setUseMjpeg(isLive);
-  }, [camId, isLive]);
+    setUseMjpeg(quality === 'high' && isLive);
+  }, [camId, isLive, quality]);
 
   useEffect(() => {
     if (useMjpeg) {
@@ -101,7 +103,7 @@ const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' 
           className="w-full h-full object-contain"
           onError={() => {
             setUseMjpeg(false);
-            setTimeout(() => setUseMjpeg(isLive), 2000);
+            setTimeout(() => setUseMjpeg(quality === 'high' && isLive), 2000);
           }}
         />
       </div>

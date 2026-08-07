@@ -354,22 +354,20 @@ async function startServer() {
         const hasAudio = await new Promise<boolean>((resolve) => {
           const probeArgs = isRtmp 
             ? [
-                "-v", "quiet",
-                "-analyzeduration", "2000000",
-                "-probesize", "2000000",
-                "-select_streams", "a",
+                "-v", "error",
+                "-analyzeduration", "3000000",
+                "-probesize", "3000000",
                 "-show_entries", "stream=codec_type",
-                "-of", "csv=p=0",
+                "-of", "default=noprint_wrappers=1",
                 cam.rtsp_url
               ]
             : [
                 "-rtsp_transport", "tcp",
-                "-v", "quiet",
-                "-analyzeduration", "2000000",
-                "-probesize", "2000000",
-                "-select_streams", "a",
+                "-v", "error",
+                "-analyzeduration", "3000000",
+                "-probesize", "3000000",
                 "-show_entries", "stream=codec_type",
-                "-of", "csv=p=0",
+                "-of", "default=noprint_wrappers=1",
                 cam.rtsp_url
               ];
           
@@ -378,11 +376,11 @@ async function startServer() {
           proc.stdout.on("data", (d) => { out += d.toString(); });
           const timer = setTimeout(() => {
             try { proc.kill("SIGKILL"); } catch (e) {}
-            resolve(false);
-          }, 4500);
+            resolve(out.toLowerCase().includes("audio"));
+          }, 3500);
           proc.on("close", () => {
             clearTimeout(timer);
-            resolve(out.trim().includes("audio"));
+            resolve(out.toLowerCase().includes("audio"));
           });
         });
 
@@ -390,8 +388,8 @@ async function startServer() {
           inputArgs = [
             "-thread_queue_size", "4096",
             "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
-            "-analyzeduration", "2000000", 
-            "-probesize", "2000000", 
+            "-analyzeduration", "3000000", 
+            "-probesize", "3000000", 
             "-i", cam.rtsp_url
           ];
         } else {
@@ -400,21 +398,21 @@ async function startServer() {
             "-rtsp_transport", "tcp", 
             "-max_delay", "500000",
             "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
-            "-analyzeduration", "2000000", 
-            "-probesize", "2000000", 
+            "-analyzeduration", "3000000", 
+            "-probesize", "3000000", 
             "-i", cam.rtsp_url
           ];
         }
 
         if (hasAudio) {
-          addLog("Áudio detectado na câmera! Transmitindo áudio nativo da câmera resincronizado para AAC 44.1kHz Estéreo.\n");
+          addLog("Áudio detectado na câmera! Transmitindo áudio nativo resincronizado para AAC 44.1kHz Estéreo.\n");
           mappingArgs = [
             "-map", "0:v:0", 
             "-map", "0:a:0?", 
             "-af", "aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo"
           ];
         } else {
-          addLog("Nenhum canal de áudio na câmera. Utilizando faixa de áudio nulo para o YouTube.\n");
+          addLog("Nenhum canal de áudio detectado na câmera. Utilizando faixa de áudio silenciosa para o YouTube.\n");
           inputArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100");
           mappingArgs = ["-map", "0:v:0", "-map", "1:a:0"];
         }
@@ -490,6 +488,7 @@ async function startServer() {
       const rtmpUrl = `rtmp://a.rtmp.youtube.com/live2/${youtubeKey}`;
       const args = [
         ...inputArgs,
+        ...mappingArgs,
         "-vf", vfFilters,
         "-c:v", "libx264",
         "-preset", "superfast", // Superfast preset for optimal CPU usage and stability
@@ -504,10 +503,9 @@ async function startServer() {
         "-maxrate", "5000k",
         "-bufsize", "10000k",
         "-c:a", "aac",
-        "-b:a", "160k", // High quality 160k audio
+        "-b:a", "128k", // High quality 128k audio
         "-ar", "44100",
         "-ac", "2", // Guarantee stereo audio channels for YouTube
-        ...mappingArgs,
         "-f", "flv",
         "-flvflags", "no_duration_filesize",
         "-rtmp_buffer", "2000",
