@@ -353,16 +353,33 @@ async function startServer() {
         // Probe if camera stream has native audio track
         const hasAudio = await new Promise<boolean>((resolve) => {
           const probeArgs = isRtmp 
-            ? ["-v", "quiet", "-select_streams", "a", "-show_entries", "stream=codec_type", "-of", "csv=p=0", cam.rtsp_url]
-            : ["-rtsp_transport", "tcp", "-v", "quiet", "-select_streams", "a", "-show_entries", "stream=codec_type", "-of", "csv=p=0", cam.rtsp_url];
+            ? [
+                "-v", "quiet",
+                "-analyzeduration", "2000000",
+                "-probesize", "2000000",
+                "-select_streams", "a",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0",
+                cam.rtsp_url
+              ]
+            : [
+                "-rtsp_transport", "tcp",
+                "-v", "quiet",
+                "-analyzeduration", "2000000",
+                "-probesize", "2000000",
+                "-select_streams", "a",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0",
+                cam.rtsp_url
+              ];
           
           const proc = spawn("ffprobe", probeArgs);
           let out = "";
           proc.stdout.on("data", (d) => { out += d.toString(); });
           const timer = setTimeout(() => {
-            proc.kill("SIGKILL");
+            try { proc.kill("SIGKILL"); } catch (e) {}
             resolve(false);
-          }, 1500);
+          }, 4500);
           proc.on("close", () => {
             clearTimeout(timer);
             resolve(out.trim().includes("audio"));
@@ -373,8 +390,8 @@ async function startServer() {
           inputArgs = [
             "-thread_queue_size", "4096",
             "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
-            "-analyzeduration", "1000000", 
-            "-probesize", "1000000", 
+            "-analyzeduration", "2000000", 
+            "-probesize", "2000000", 
             "-i", cam.rtsp_url
           ];
         } else {
@@ -383,18 +400,18 @@ async function startServer() {
             "-rtsp_transport", "tcp", 
             "-max_delay", "500000",
             "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
-            "-analyzeduration", "1000000", 
-            "-probesize", "1000000", 
+            "-analyzeduration", "2000000", 
+            "-probesize", "2000000", 
             "-i", cam.rtsp_url
           ];
         }
 
         if (hasAudio) {
-          addLog("Áudio detectado na câmera! Transmitindo áudio nativo da câmera com resincronização aresample.\n");
+          addLog("Áudio detectado na câmera! Transmitindo áudio nativo da câmera resincronizado para AAC 44.1kHz Estéreo.\n");
           mappingArgs = [
             "-map", "0:v:0", 
             "-map", "0:a:0", 
-            "-af", "aresample=async=1000:min_hard_comp=0.100000"
+            "-af", "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,aresample=async=1000:min_hard_comp=0.100000"
           ];
         } else {
           addLog("Nenhum canal de áudio na câmera. Utilizando faixa de áudio nulo para o YouTube.\n");
@@ -796,25 +813,27 @@ async function startServer() {
     });
 
     const isPreview = req.query.quality === "preview";
-    const scaleFilter = isPreview ? "scale=640:-1" : "scale=1280:-1";
-    const fpsRate = isPreview ? "15" : "30";
-    const qualityVal = isPreview ? "6" : "3";
+    const scaleFilter = isPreview ? "scale=480:-1" : "scale=960:-1";
+    const fpsRate = isPreview ? "12" : "25";
+    const qualityVal = isPreview ? "8" : "5";
 
     const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
     const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp"];
 
     const args = [
-      "-thread_queue_size", "2048",
+      "-use_wallclock_as_timestamps", "1",
+      "-thread_queue_size", "4096",
       "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
       ...transportOpts,
-      "-probesize", "100000",
-      "-analyzeduration", "100000",
+      "-probesize", "500000",
+      "-analyzeduration", "500000",
       "-i", cam.rtsp_url,
       "-r", fpsRate,
       "-vf", scaleFilter,
       "-an",
       "-c:v", "mjpeg",
       "-q:v", qualityVal,
+      "-flush_packets", "1",
       "-f", "mpjpeg",
       "-boundary_tag", "ffmpeg",
       "-"

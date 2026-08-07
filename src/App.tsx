@@ -97,7 +97,7 @@ const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' 
     return (
       <div className={`relative bg-black/40 overflow-hidden ${className}`}>
         <img 
-          key={`${camId}-${displayedSrc}`}
+          key={`mjpeg-cam-${camId}`}
           src={displayedSrc} 
           alt="Live Camera Stream"
           className="w-full h-full object-contain"
