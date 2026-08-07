@@ -1113,8 +1113,66 @@ async function startServer() {
     res.json({ success: true, status: db.stream_status });
   });
 
-  app.post("/api/stream/switch", authenticate, (req, res) => {
+  const checkCameraOnline = (rtspUrl: string): Promise<boolean> => {
+    if (!rtspUrl) return Promise.resolve(false);
+    const isRtmp = rtspUrl.startsWith("rtmp://") || rtspUrl.startsWith("rtmps://");
+    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp"];
+    const probeArgs = [
+      ...transportOpts,
+      "-v", "error",
+      "-analyzeduration", "1000000",
+      "-probesize", "1000000",
+      "-show_entries", "stream=codec_type",
+      "-of", "default=noprint_wrappers=1",
+      rtspUrl
+    ];
+
+    return new Promise<boolean>((resolve) => {
+      let proc: any = null;
+      let out = "";
+      try {
+        proc = spawn("ffprobe", probeArgs);
+      } catch (e) {
+        return resolve(false);
+      }
+
+      const timer = setTimeout(() => {
+        try { proc.kill("SIGKILL"); } catch (e) {}
+        resolve(out.toLowerCase().includes("video") || out.toLowerCase().includes("audio"));
+      }, 2500);
+
+      if (proc.stdout) {
+        proc.stdout.on("data", (d: any) => { out += d.toString(); });
+      }
+      proc.on("close", () => {
+        clearTimeout(timer);
+        resolve(out.toLowerCase().includes("video") || out.toLowerCase().includes("audio"));
+      });
+      proc.on("error", () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+    });
+  };
+
+  app.post("/api/stream/switch", authenticate, async (req, res) => {
     const { type, id } = req.body;
+    const db = getDb();
+
+    if (type === "camera") {
+      const cam = db.cameras.find((c: any) => c.id === id);
+      if (!cam) {
+        return res.status(404).json({ error: "Câmera não encontrada." });
+      }
+
+      addLog(`[SERVER] Verificando sinal da câmera "${cam.name}" (ID ${cam.id})...\n`);
+      const isOnline = await checkCameraOnline(cam.rtsp_url);
+      if (!isOnline) {
+        addLog(`[SERVER] RECUSADO: Câmera "${cam.name}" está OFFLINE ou sem sinal de vídeo.\n`);
+        return res.status(400).json({ error: `A câmera "${cam.name}" está OFFLINE ou sem sinal de vídeo. A transmissão não foi alterada.` });
+      }
+    }
+
     res.json({ success: true, message: "Troca de transmissão solicitada" });
     startStream(type, id);
   });

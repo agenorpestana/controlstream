@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Camera, Video, Play, Square, Settings, Plus, Trash2, LogOut, Activity, Monitor, Upload, Repeat, RefreshCw, Mic, MicOff, Trophy, Pause, RotateCcw, Edit } from 'lucide-react';
+import { Camera, Video, Play, Square, Settings, Plus, Trash2, LogOut, Activity, Monitor, Upload, Repeat, RefreshCw, Mic, MicOff, Trophy, Pause, RotateCcw, Edit, AlertTriangle, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { io } from 'socket.io-client';
 
@@ -47,7 +47,15 @@ const CameraPreview = ({ camId, className = '', quality = 'high' }: { camId: num
     setDisplayedSrc(url);
     setError(false);
 
+    // Auto-refresh imperceptível a cada 2 minutos (120s) para manter a conexão HTTP de vídeo sempre ativa
+    const autoRefreshInterval = setInterval(() => {
+      if (imgRef.current) {
+        imgRef.current.src = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&ar=${Date.now()}`;
+      }
+    }, 120000);
+
     return () => {
+      clearInterval(autoRefreshInterval);
       // ONLY clear src when switching camera ID/quality or unmounting
       if (imgRef.current) {
         imgRef.current.src = '';
@@ -644,21 +652,18 @@ export default function App() {
   };
 
   const [isSwitching, setIsSwitching] = useState(false);
+  const [offlineAlert, setOfflineAlert] = useState<string | null>(null);
 
   const switchStream = async (type: 'camera' | 'video' | 'web', id: number | string) => {
     if (isSwitching) return;
     setIsSwitching(true);
+    setOfflineAlert(null);
     const token = localStorage.getItem('token');
     setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] Solicitando troca de stream para: ${type} (${id})...\n`]);
-    
-    // Optimistic update to show immediate response
-    if (status) {
-      setStatus({ ...status, is_streaming: true, current_source_type: type, current_source_id: id });
-    }
 
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
 
       const response = await fetch('/api/stream/switch', {
         method: 'POST',
@@ -670,9 +675,22 @@ export default function App() {
         signal: controller.signal
       });
       clearTimeout(timeoutId);
+
+      const resData = await response.json().catch(() => null);
+
       if (!response.ok) {
-        throw new Error(`Erro na API: ${response.statusText}`);
+        const errorMsg = resData?.error || `A câmera selecionada está indisponível ou offline. Troca cancelada.`;
+        setOfflineAlert(errorMsg);
+        setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] TROCA RECUSADA: ${errorMsg}\n`]);
+        setTimeout(() => setOfflineAlert(null), 8000);
+        return;
       }
+
+      // Optimistic update ONLY after server confirms stream is accessible
+      if (status) {
+        setStatus({ ...status, is_streaming: true, current_source_type: type, current_source_id: id });
+      }
+
       setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] API respondeu com sucesso.\n`]);
       
       // Se trocamos para web/local, ativamos um gatilho de seguranca
@@ -689,9 +707,13 @@ export default function App() {
         }, 2500);
       }
     } catch (error: any) {
-      setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] ERRO NA TROCA DE STREAM: ${error.message}\n`]);
+      const msg = error.name === 'AbortError' 
+        ? 'A câmera demorou muito para responder e parece estar offline. A transmissão não foi alterada.' 
+        : `Erro ao conectar: ${error.message}`;
+      setOfflineAlert(msg);
+      setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] ERRO NA TROCA DE STREAM: ${msg}\n`]);
+      setTimeout(() => setOfflineAlert(null), 8000);
     } finally {
-      // Pequeno delay para o servidor salvar o DB antes de buscarmos
       setTimeout(() => {
         fetchData();
         setIsSwitching(false);
@@ -1297,6 +1319,31 @@ export default function App() {
             )}
           </div>
         </header>
+
+        {offlineAlert && (
+          <motion.div 
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            className="mb-8 bg-red-500/15 border border-red-500/40 text-red-300 p-4 rounded-2xl flex items-center justify-between gap-4 shadow-xl backdrop-blur-md"
+          >
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-red-500/20 rounded-xl text-red-400 shrink-0">
+                <AlertTriangle size={22} />
+              </div>
+              <div>
+                <h4 className="text-xs font-bold font-mono uppercase tracking-wider text-red-400">Atenção: Câmera Indisponível / Offline</h4>
+                <p className="text-sm font-medium text-red-200 mt-0.5">{offlineAlert}</p>
+              </div>
+            </div>
+            <button 
+              onClick={() => setOfflineAlert(null)}
+              className="p-2 hover:bg-white/10 rounded-xl text-white/60 hover:text-white transition-colors shrink-0"
+            >
+              <X size={18} />
+            </button>
+          </motion.div>
+        )}
 
         <AnimatePresence mode="wait">
           {activeTab === 'dashboard' && (
