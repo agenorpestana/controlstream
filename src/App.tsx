@@ -1472,36 +1472,69 @@ export default function App() {
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  {cameras.map(cam => (
-                    <div key={cam.id} className={`bg-[#151619] rounded-2xl border transition-all overflow-hidden group ${status?.current_source_id === cam.id && status.current_source_type === 'camera' ? 'border-emerald-500 shadow-lg shadow-emerald-500/10' : 'border-white/10 hover:border-white/20'}`}>
-                      <div className="aspect-video bg-black/40 relative">
-                        <CameraPreview key={`dash-cam-${cam.id}`} camId={cam.id} className="w-full h-full opacity-40 group-hover:opacity-60 transition-opacity" isLive={true} quality="preview" />
-                        <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/60">
+                  {cameras.map(cam => {
+                    const isActive = status?.current_source_id === cam.id && status.current_source_type === 'camera';
+                    return (
+                      <div 
+                        key={cam.id} 
+                        onClick={() => switchStream('camera', cam.id)}
+                        role="button"
+                        tabIndex={0}
+                        className={`bg-[#151619] rounded-2xl border transition-all overflow-hidden group cursor-pointer select-none active:scale-[0.98] ${
+                          isActive 
+                            ? 'border-emerald-500 shadow-lg shadow-emerald-500/10 ring-1 ring-emerald-500/30' 
+                            : 'border-white/10 hover:border-emerald-500/50'
+                        }`}
+                      >
+                        <div className="aspect-video bg-black/40 relative pointer-events-none">
+                          <CameraPreview key={`dash-cam-${cam.id}`} camId={cam.id} className="w-full h-full opacity-60 group-hover:opacity-80 transition-opacity" isLive={true} quality="preview" />
+                          <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/50 transition-colors">
+                            <div className={`p-3.5 rounded-full shadow-xl transition-transform transform group-hover:scale-110 ${isActive ? 'bg-emerald-500 text-white' : 'bg-black/60 text-white/90 border border-white/20 group-hover:bg-emerald-500 group-hover:text-white'}`}>
+                              <Play fill="currentColor" size={22} />
+                            </div>
+                          </div>
+                          <div className="absolute top-3 left-3 bg-black/70 backdrop-blur-md px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold uppercase tracking-wider text-white border border-white/10">
+                            CAM #{cam.id}
+                          </div>
+                          {isActive && (
+                            <div className="absolute top-3 right-3 bg-emerald-500 text-white text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider shadow">
+                              NO AR
+                            </div>
+                          )}
+                        </div>
+                        <div className="p-4 flex items-center justify-between">
+                          <div>
+                            <h4 className="font-bold text-white text-sm group-hover:text-emerald-400 transition-colors">{cam.name}</h4>
+                            <p className="text-xs text-white/40 font-mono truncate max-w-[180px]">{cam.rtsp_url}</p>
+                          </div>
                           <button 
-                            onClick={() => switchStream('camera', cam.id)}
-                            className="bg-emerald-500 text-white p-4 rounded-full shadow-xl transform scale-90 group-hover:scale-100 transition-transform"
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              switchStream('camera', cam.id);
+                            }}
+                            className={`px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer ${
+                              isActive 
+                                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' 
+                                : 'bg-white/5 text-white/80 border border-white/10 group-hover:bg-emerald-500 group-hover:text-white'
+                            }`}
                           >
-                            <Play fill="currentColor" size={24} />
+                            {isActive ? (
+                              <>
+                                <Activity size={14} className="animate-pulse" />
+                                <span>Ativo</span>
+                              </>
+                            ) : (
+                              <>
+                                <Play size={12} fill="currentColor" />
+                                <span>Trocar</span>
+                              </>
+                            )}
                           </button>
                         </div>
-                        <div className="absolute top-3 left-3 bg-black/60 backdrop-blur-md px-3 py-1 rounded-lg text-[10px] font-mono uppercase tracking-wider">
-                          CAM {cam.id}
-                        </div>
                       </div>
-                      <div className="p-4 flex items-center justify-between">
-                        <div>
-                          <h4 className="font-bold">{cam.name}</h4>
-                          <p className="text-xs text-white/40 font-mono truncate max-w-[150px]">{cam.rtsp_url}</p>
-                        </div>
-                        {status?.current_source_id === cam.id && status.current_source_type === 'camera' && (
-                          <div className="flex items-center gap-2 text-emerald-500">
-                            <Activity size={16} className="animate-pulse" />
-                            <span className="text-[10px] font-bold uppercase tracking-widest">Ativo</span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
 
@@ -2249,14 +2282,18 @@ export default function App() {
                         </div>
                         <div className="flex items-center gap-2">
                           <button 
+                            type="button"
                             onClick={() => switchStream('video', vid.id)}
-                            className={`p-2 rounded-lg transition-all ${status?.current_source_id === vid.id && status.current_source_type === 'video' ? 'bg-emerald-500 text-white' : 'text-white/20 hover:text-emerald-500 hover:bg-emerald-500/10'}`}
+                            className={`p-2.5 rounded-xl transition-all cursor-pointer ${status?.current_source_id === vid.id && status.current_source_type === 'video' ? 'bg-emerald-500 text-white shadow-md' : 'text-white/60 bg-white/5 hover:text-emerald-400 hover:bg-emerald-500/20 border border-white/5'}`}
+                            title="Transmitir Vídeo"
                           >
                             <Play size={16} fill="currentColor" />
                           </button>
                           <button 
+                            type="button"
                             onClick={() => deleteVideo(vid.id)}
-                            className="p-2 text-white/10 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                            className="p-2.5 text-white/40 hover:text-red-400 hover:bg-red-500/20 rounded-xl transition-all border border-white/5"
+                            title="Excluir Vídeo"
                           >
                             <Trash2 size={16} />
                           </button>
