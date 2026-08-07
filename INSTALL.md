@@ -10,7 +10,7 @@
 ## 1. Install System Dependencies
 ```bash
 sudo apt update
-sudo apt install -y nginx libnginx-mod-rtmp ffmpeg mysql-server nodejs npm build-essential
+sudo apt install -y nginx ffmpeg mysql-server nodejs npm build-essential
 ```
 
 ## 2. Nginx RTMP Configuration

@@ -13,24 +13,36 @@ import https from "https";
 import NodeMediaServer from "node-media-server";
 
 // Start RTMP server for receiving push cameras
-try {
-  const nms = new NodeMediaServer({
-    rtmp: {
-      port: 1935,
-      chunk_size: 60000,
-      gop_cache: true,
-      ping: 30,
-      ping_timeout: 60
-    },
-    http: {
-      port: 8000,
-      allow_origin: "*"
-    }
-  });
-  nms.run();
-  console.log("Servidor RTMP iniciado na porta 1935 para recepção de câmeras push");
-} catch (err) {
-  console.error("Aviso ao iniciar servidor RTMP:", err);
+if (process.env.DISABLE_RTMP_SERVER !== "true") {
+  try {
+    const rtmpPort = parseInt(process.env.RTMP_PORT || "1935", 10);
+    const rtmpHttpPort = parseInt(process.env.RTMP_HTTP_PORT || "8000", 10);
+    const nms = new NodeMediaServer({
+      rtmp: {
+        port: rtmpPort,
+        chunk_size: 60000,
+        gop_cache: true,
+        ping: 30,
+        ping_timeout: 60
+      },
+      http: {
+        port: rtmpHttpPort,
+        allow_origin: "*"
+      }
+    });
+    
+    // Catch uncaught errors on nms server so EADDRINUSE doesn't crash app
+    nms.on('error', (err: any) => {
+      console.error("Erro no servidor RTMP (NodeMediaServer):", err?.message || err);
+    });
+
+    nms.run();
+    console.log(`Servidor RTMP iniciado na porta ${rtmpPort} para recepção de câmeras push`);
+  } catch (err: any) {
+    console.error("Aviso ao iniciar servidor RTMP:", err?.message || err);
+  }
+} else {
+  console.log("Servidor RTMP interno desativado via DISABLE_RTMP_SERVER=true");
 }
 
 // Font downloader for sports scoreboard overlay in FFmpeg
@@ -779,7 +791,8 @@ async function startServer() {
       "Content-Type": "multipart/x-mixed-replace; boundary=ffmpeg",
       "Cache-Control": "no-cache, no-store, must-revalidate",
       "Connection": "keep-alive",
-      "Pragma": "no-cache"
+      "Pragma": "no-cache",
+      "X-Accel-Buffering": "no"
     });
 
     const isPreview = req.query.quality === "preview";
@@ -792,9 +805,10 @@ async function startServer() {
 
     const args = [
       "-thread_queue_size", "2048",
+      "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
       ...transportOpts,
-      "-probesize", "300000",
-      "-analyzeduration", "300000",
+      "-probesize", "100000",
+      "-analyzeduration", "100000",
       "-i", cam.rtsp_url,
       "-r", fpsRate,
       "-vf", scaleFilter,

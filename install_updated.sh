@@ -258,6 +258,8 @@ DB_PASSWORD="${DB_PASSWORD}"
 DB_NAME=${DB_NAME}
 NODE_ENV=production
 JWT_SECRET="${SECRET_KEY}"
+RTMP_PORT=1935
+RTMP_HTTP_PORT=8000
 EOL
     npm install && npm run build
     PM2_START_DIR="$APP_DIR"
@@ -270,15 +272,11 @@ EOL
     fi
 fi
 
-# PM2
-cd $PM2_START_DIR
-pm2 delete $PM2_NAME 2>/dev/null
-if [[ "$PM2_SCRIPT" == *.ts ]]; then
-    PORT=$APP_PORT pm2 start "npx tsx $PM2_SCRIPT" --name "$PM2_NAME"
-else
-    PORT=$APP_PORT pm2 start "$PM2_SCRIPT" --name "$PM2_NAME"
+# Desativar módulo rtmp padrão do Nginx se existir para evitar conflito de porta 1935
+if [ -f /etc/nginx/modules-enabled/50-mod-rtmp.conf ]; then
+    echo -e "${YELLOW}Removendo conflito de porta 1935 do módulo Nginx RTMP...${NC}"
+    rm -f /etc/nginx/modules-enabled/50-mod-rtmp.conf /etc/nginx/modules-enabled/*rtmp*
 fi
-pm2 save
 
 # Nginx
 NGINX_CONF="/etc/nginx/sites-available/$DOMAIN"
@@ -286,31 +284,52 @@ WEB_ROOT="$APP_DIR/dist"
 if [ ! -d "$WEB_ROOT" ] && [ -d "$APP_DIR/build" ]; then WEB_ROOT="$APP_DIR/build"; fi
 
 cat > $NGINX_CONF <<EOL
+map \$http_upgrade \$connection_upgrade {
+    default upgrade;
+    '' close;
+}
+
 server {
     listen 80;
     server_name $DOMAIN;
     root $WEB_ROOT;
     index index.html;
-    client_max_body_size 200M;
+    client_max_body_size 500M;
 
-    location /api {
-        proxy_pass http://localhost:$APP_PORT;
+    location /socket.io/ {
+        proxy_pass http://127.0.0.1:$APP_PORT/socket.io/;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
+        proxy_set_header Connection \$connection_upgrade;
         proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_buffering off;
+    }
+
+    location /api {
+        proxy_pass http://127.0.0.1:$APP_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_cache_bypass \$http_upgrade;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
     }
 
     location /uploads {
-        proxy_pass http://localhost:$APP_PORT;
+        proxy_pass http://127.0.0.1:$APP_PORT;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
         proxy_set_header Host \$host;
-        proxy_cache_bypass \$http_upgrade;
-        # Configuração para persistência de uploads
-        client_max_body_size 200M;
+        client_max_body_size 500M;
     }
 
     location / {
@@ -318,8 +337,6 @@ server {
     }
 
     # Inclusão de configurações personalizadas (opcional)
-    # Se você criar um arquivo chamado ${DOMAIN}.custom dentro de /etc/nginx/sites-available/
-    # ele será incluído aqui automaticamente.
     include /etc/nginx/sites-available/${DOMAIN}.custom*;
 }
 EOL
@@ -328,6 +345,16 @@ nginx -t && systemctl restart nginx
 
 # SSL
 certbot --nginx -d $DOMAIN --non-interactive --agree-tos -m admin@$DOMAIN --redirect
+
+# PM2 (Iniciado após Nginx e Certbot estarem ativos)
+cd $PM2_START_DIR
+pm2 delete $PM2_NAME 2>/dev/null
+if [[ "$PM2_SCRIPT" == *.ts ]]; then
+    PORT=$APP_PORT pm2 start "npx tsx $PM2_SCRIPT" --name "$PM2_NAME"
+else
+    PORT=$APP_PORT pm2 start "$PM2_SCRIPT" --name "$PM2_NAME"
+fi
+pm2 save
 
 echo -e "${GREEN}=== Processo Concluído! ===${NC}"
 echo -e "URL: https://$DOMAIN"
