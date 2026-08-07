@@ -43,29 +43,49 @@ const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' 
   const [displayedSrc, setDisplayedSrc] = useState<string>('');
   const [error, setError] = useState(false);
   const [loading, setLoading] = useState(true);
+  const imgRef = useRef<HTMLImageElement | null>(null);
 
   useEffect(() => {
     setUseMjpeg(quality === 'high' && isLive);
   }, [camId, isLive, quality]);
 
+  // Cleanup image element explicitly to terminate TCP connection immediately when unmounting or switching cameras
+  useEffect(() => {
+    return () => {
+      if (imgRef.current) {
+        imgRef.current.src = '';
+        imgRef.current.removeAttribute('src');
+      }
+    };
+  }, [camId, useMjpeg]);
+
   useEffect(() => {
     if (useMjpeg) {
+      if (imgRef.current) {
+        imgRef.current.src = '';
+      }
       setDisplayedSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&t=${Date.now()}`);
       setLoading(false);
       setError(false);
-      return;
+      return () => {
+        if (imgRef.current) {
+          imgRef.current.src = '';
+          imgRef.current.removeAttribute('src');
+        }
+      };
     }
 
     let active = true;
     let isFetching = false;
+    let currentImg: HTMLImageElement | null = null;
 
     const fetchNextFrame = () => {
       if (!active || isFetching) return;
       isFetching = true;
 
       const url = `/api/cameras/${camId}/snapshot?token=${token}&t=${Date.now()}`;
-      const img = new Image();
-      img.onload = () => {
+      currentImg = new Image();
+      currentImg.onload = () => {
         isFetching = false;
         if (active) {
           setDisplayedSrc(url);
@@ -73,14 +93,14 @@ const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' 
           setError(false);
         }
       };
-      img.onerror = () => {
+      currentImg.onerror = () => {
         isFetching = false;
         if (active) {
           setError(true);
           setLoading(false);
         }
       };
-      img.src = url;
+      currentImg.src = url;
     };
 
     fetchNextFrame();
@@ -90,6 +110,15 @@ const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' 
     return () => {
       active = false;
       clearInterval(interval);
+      if (currentImg) {
+        currentImg.onload = null;
+        currentImg.onerror = null;
+        currentImg.src = '';
+      }
+      if (imgRef.current) {
+        imgRef.current.src = '';
+        imgRef.current.removeAttribute('src');
+      }
     };
   }, [camId, token, isLive, useMjpeg, quality]);
 
@@ -97,6 +126,7 @@ const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' 
     return (
       <div className={`relative bg-black/40 overflow-hidden ${className}`}>
         <img 
+          ref={imgRef}
           key={`mjpeg-cam-${camId}`}
           src={displayedSrc} 
           alt="Live Camera Stream"
@@ -134,6 +164,7 @@ const CameraPreview = ({ camId, className = '', isLive = true, quality = 'high' 
         </div>
       ) : (
         <img 
+          ref={imgRef}
           src={displayedSrc || `/api/cameras/${camId}/snapshot?token=${token}`} 
           alt="Preview"
           className="w-full h-full object-contain"
@@ -671,14 +702,19 @@ export default function App() {
     }
 
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+
       const response = await fetch('/api/stream/switch', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}` 
         },
-        body: JSON.stringify({ type, id })
+        body: JSON.stringify({ type, id }),
+        signal: controller.signal
       });
+      clearTimeout(timeoutId);
       if (!response.ok) {
         throw new Error(`Erro na API: ${response.statusText}`);
       }

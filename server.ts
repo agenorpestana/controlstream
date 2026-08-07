@@ -313,8 +313,15 @@ async function startServer() {
   };
 
   let isStarting = false;
+  let activeProbeProc: any = null;
+  let activeHighQualityMjpegProc: any = null;
+
   const startStream = async (type: "camera" | "video" | "web", id: number | string) => {
-    if (isStarting) return;
+    // If a probe is already running, cancel it so the new request can execute immediately
+    if (activeProbeProc) {
+      try { activeProbeProc.kill("SIGKILL"); } catch (e) {}
+      activeProbeProc = null;
+    }
     isStarting = true;
     const msg = `[SERVER] startStream chamado: type=${type}, id=${id}`;
     console.log(msg);
@@ -372,14 +379,17 @@ async function startServer() {
               ];
           
           const proc = spawn("ffprobe", probeArgs);
+          activeProbeProc = proc;
           let out = "";
           proc.stdout.on("data", (d) => { out += d.toString(); });
           const timer = setTimeout(() => {
             try { proc.kill("SIGKILL"); } catch (e) {}
+            if (activeProbeProc === proc) activeProbeProc = null;
             resolve(out.toLowerCase().includes("audio"));
           }, 3500);
           proc.on("close", () => {
             clearTimeout(timer);
+            if (activeProbeProc === proc) activeProbeProc = null;
             resolve(out.toLowerCase().includes("audio"));
           });
         });
@@ -819,15 +829,22 @@ async function startServer() {
     const cam = db.cameras.find((c: any) => c.id === camId);
     if (!cam) return res.status(404).json({ error: "Câmera não encontrada" });
 
+    const isPreview = req.query.quality === "preview";
+
+    // Terminate any old active high-quality player stream to immediately release browser sockets and CPU
+    if (!isPreview && activeHighQualityMjpegProc) {
+      try { activeHighQualityMjpegProc.kill("SIGKILL"); } catch (e) {}
+      activeHighQualityMjpegProc = null;
+    }
+
     res.writeHead(200, {
       "Content-Type": "multipart/x-mixed-replace; boundary=ffmpeg",
       "Cache-Control": "no-cache, no-store, must-revalidate",
-      "Connection": "keep-alive",
+      "Connection": "close",
       "Pragma": "no-cache",
       "X-Accel-Buffering": "no"
     });
 
-    const isPreview = req.query.quality === "preview";
     const scaleFilter = isPreview ? "scale=480:-1" : "scale=960:-1";
     const fpsRate = isPreview ? "12" : "25";
     const qualityVal = isPreview ? "8" : "5";
@@ -855,23 +872,43 @@ async function startServer() {
     ];
 
     const ff = spawn("ffmpeg", args);
+    if (!isPreview) {
+      activeHighQualityMjpegProc = ff;
+    }
+
     ff.stdout.pipe(res);
 
     let killed = false;
     const cleanup = () => {
       if (killed) return;
       killed = true;
+      if (activeHighQualityMjpegProc === ff) {
+        activeHighQualityMjpegProc = null;
+      }
       try {
         ff.stdout.unpipe(res);
         ff.kill("SIGKILL");
+      } catch (e) {}
+      try {
+        if (!res.writableEnded) res.end();
       } catch (e) {}
     };
 
     req.on("close", cleanup);
     req.on("aborted", cleanup);
+    req.on("end", cleanup);
+    req.on("error", cleanup);
     res.on("close", cleanup);
     res.on("finish", cleanup);
-    ff.on("close", () => { killed = true; });
+    res.on("error", cleanup);
+    if (req.socket) {
+      req.socket.on("close", cleanup);
+      req.socket.on("error", cleanup);
+    }
+    ff.on("close", () => {
+      killed = true;
+      if (activeHighQualityMjpegProc === ff) activeHighQualityMjpegProc = null;
+    });
   });
 
   app.post("/api/cameras", authenticate, (req, res) => {
