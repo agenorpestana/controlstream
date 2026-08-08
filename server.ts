@@ -129,7 +129,8 @@ const initDb = () => {
         timer_running: false,
         logo_enabled: false,
         active_logo_id: null,
-        logo_position: "top_right"
+        logo_position: "top_right",
+        block_offline_switch: true
       }
     }, null, 2));
   }
@@ -163,6 +164,10 @@ const initDb = () => {
     dbCache.stream_status.logo_enabled = false;
     dbCache.stream_status.active_logo_id = null;
     dbCache.stream_status.logo_position = "top_right";
+    updated = true;
+  }
+  if (dbCache.stream_status.block_offline_switch === undefined) {
+    dbCache.stream_status.block_offline_switch = true;
     updated = true;
   }
   if (updated) {
@@ -1139,6 +1144,18 @@ async function startServer() {
     res.json({ success: true, status: db.stream_status });
   });
 
+  app.post("/api/status/block-offline", authenticate, (req, res) => {
+    const { block_offline_switch } = req.body;
+    const db = getDb();
+    if (block_offline_switch !== undefined) {
+      db.stream_status.block_offline_switch = Boolean(block_offline_switch);
+    }
+    saveDb(db);
+    io.emit("stream_status", db.stream_status);
+    console.log(`[SERVER] Opção de bloqueio de troca de câmera offline alterada para: ${db.stream_status.block_offline_switch}`);
+    res.json({ success: true, status: db.stream_status });
+  });
+
   app.get("/api/status", authenticate, (req, res) => {
     const status = { ...getDb().stream_status };
     const currentHost = req.get("host")?.split(":")[0] || req.hostname;
@@ -1321,11 +1338,16 @@ async function startServer() {
         return res.status(404).json({ error: "Câmera não encontrada." });
       }
 
-      addLog(`[SERVER] Verificando sinal da câmera "${cam.name}" (ID ${cam.id})...\n`);
-      const isOnline = await checkCameraOnline(cam.rtsp_url);
-      if (!isOnline) {
-        addLog(`[SERVER] RECUSADO: Câmera "${cam.name}" está OFFLINE ou sem sinal de vídeo.\n`);
-        return res.status(400).json({ error: `A câmera "${cam.name}" está OFFLINE ou sem sinal de vídeo. A transmissão não foi alterada.` });
+      const shouldBlockOffline = db.stream_status.block_offline_switch !== false;
+      if (shouldBlockOffline) {
+        addLog(`[SERVER] Verificando sinal da câmera "${cam.name}" (ID ${cam.id})...\n`);
+        const isOnline = await checkCameraOnline(cam.rtsp_url);
+        if (!isOnline) {
+          addLog(`[SERVER] RECUSADO: Câmera "${cam.name}" está OFFLINE ou sem sinal de vídeo.\n`);
+          return res.status(400).json({ error: `A câmera "${cam.name}" está OFFLINE ou sem sinal de vídeo. A transmissão não foi alterada.` });
+        }
+      } else {
+        addLog(`[SERVER] Troca para a câmera "${cam.name}" permitida (Bloqueio de câmera offline DESATIVADO).\n`);
       }
     }
 

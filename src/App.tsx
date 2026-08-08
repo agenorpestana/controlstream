@@ -43,6 +43,7 @@ interface StreamStatus {
   logo_enabled?: boolean;
   active_logo_id?: number | null;
   logo_position?: 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right';
+  block_offline_switch?: boolean;
 }
 
 const CameraPreview = ({ camId, className = '', quality = 'high' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
@@ -722,6 +723,26 @@ export default function App() {
       }
     } catch (err) {
       console.error("Erro ao atualizar status da logo:", err);
+    }
+  };
+
+  const handleToggleBlockOffline = async (enabled: boolean) => {
+    const token = localStorage.getItem('token');
+    try {
+      const res = await fetch('/api/status/block-offline', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ block_offline_switch: enabled })
+      });
+      const data = await res.json();
+      if (res.ok && data.status) {
+        setStatus(data.status);
+      }
+    } catch (err) {
+      console.error("Erro ao atualizar opção de bloqueio offline:", err);
     }
   };
 
@@ -2130,6 +2151,36 @@ export default function App() {
               exit={{ opacity: 0, x: -20 }}
               className="max-w-4xl"
             >
+              {/* Quick Toggle Banner for Offline Camera Switch */}
+              <div className="bg-[#151619] rounded-2xl border border-white/10 p-4 mb-6 flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className={`p-2.5 rounded-xl ${status?.block_offline_switch !== false ? 'bg-amber-500/10 text-amber-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
+                    <AlertTriangle size={18} />
+                  </div>
+                  <div>
+                    <p className="text-xs font-bold text-white">Troca de Câmera Offline</p>
+                    <p className="text-[11px] text-white/40">
+                      {status?.block_offline_switch !== false
+                        ? 'Bloqueado: Não permite trocar para câmera offline'
+                        : 'Permitido: Pode trocar mesmo se a câmera estiver offline'}
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => handleToggleBlockOffline(status?.block_offline_switch === false ? true : false)}
+                  className={`px-3.5 py-1.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+                    status?.block_offline_switch !== false
+                      ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30'
+                      : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30'
+                  }`}
+                >
+                  <div className={`w-2 h-2 rounded-full ${status?.block_offline_switch !== false ? 'bg-amber-400' : 'bg-emerald-400'}`} />
+                  <span>{status?.block_offline_switch !== false ? 'Bloqueio Ativo' : 'Permitir Offline'}</span>
+                </button>
+              </div>
+
               <div className="bg-[#151619] rounded-3xl border border-white/10 p-8 mb-8">
                 {/* Header with Title & Security Badge */}
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
@@ -2849,6 +2900,46 @@ export default function App() {
                       className="bg-emerald-500 hover:bg-emerald-600 text-white font-bold px-6 py-3 rounded-xl transition-all"
                     >
                       Salvar Domínio
+                    </button>
+                  </div>
+                </div>
+
+                <div className="pt-6 border-t border-white/10">
+                  <h3 className="text-xl font-bold mb-2">Troca de Câmeras Offline</h3>
+                  <p className="text-xs text-white/40 mb-4 leading-relaxed">
+                    Defina se o sistema deve impedir a troca para câmeras que estiverem offline ou permitir a troca mesmo sem sinal de vídeo.
+                  </p>
+
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5 bg-black/40 rounded-2xl border border-white/10">
+                    <div className="flex items-center gap-3">
+                      <div className={`p-3 rounded-xl shrink-0 ${status?.block_offline_switch !== false ? 'bg-amber-500/10 text-amber-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
+                        <AlertTriangle size={22} />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-bold text-white">
+                          {status?.block_offline_switch !== false
+                            ? 'Bloqueio Ativado (Não troca se offline)'
+                            : 'Bloqueio Desativado (Permite trocar offline)'}
+                        </h4>
+                        <p className="text-xs text-white/40 mt-0.5">
+                          {status?.block_offline_switch !== false
+                            ? 'Se uma câmera estiver offline, a troca é recusada e mantém a transmissão atual.'
+                            : 'Permite trocar a câmera mesmo se estiver offline ou sem sinal de vídeo.'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleToggleBlockOffline(status?.block_offline_switch === false ? true : false)}
+                      className={`px-5 py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer shrink-0 ${
+                        status?.block_offline_switch !== false
+                          ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30 shadow-lg shadow-amber-500/10'
+                          : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 shadow-lg shadow-emerald-500/10'
+                      }`}
+                    >
+                      <div className={`w-2.5 h-2.5 rounded-full ${status?.block_offline_switch !== false ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'}`} />
+                      <span>{status?.block_offline_switch !== false ? 'BLOQUEAR OFFLINE' : 'PERMITIR OFFLINE'}</span>
                     </button>
                   </div>
                 </div>
