@@ -157,6 +157,7 @@ export default function App() {
   const [logos, setLogos] = useState<LogoData[]>([]);
   const [logoFile, setLogoFile] = useState<File | null>(null);
   const [isUploadingLogo, setIsUploadingLogo] = useState(false);
+  const logoFileInputRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<StreamStatus | null>(null);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'cameras' | 'videos' | 'settings'>('dashboard');
   const [newCam, setNewCam] = useState({ name: '', rtsp_url: '' });
@@ -656,16 +657,28 @@ export default function App() {
         headers: { Authorization: `Bearer ${token}` },
         body: formData
       });
-      const data = await res.json();
+      const contentType = res.headers.get("content-type");
+      let data: any = {};
+      if (contentType && contentType.includes("application/json")) {
+        data = await res.json();
+      } else {
+        const text = await res.text();
+        console.error("Resposta não-JSON do servidor:", text);
+        throw new Error(`Servidor retornou resposta inesperada (${res.status})`);
+      }
+
       if (res.ok && data.success) {
         if (data.logos) setLogos(data.logos);
         setLogoFile(null);
+        if (logoFileInputRef.current) {
+          logoFileInputRef.current.value = '';
+        }
       } else {
         alert(data.error || 'Erro ao enviar logomarca');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Erro no upload da logo:", err);
-      alert("Erro ao enviar imagem da logo");
+      alert("Erro ao enviar imagem da logo: " + (err.message || "Erro de conexão"));
     } finally {
       setIsUploadingLogo(false);
     }
@@ -1804,6 +1817,7 @@ export default function App() {
                     <label className="text-[11px] font-bold uppercase tracking-wider text-white/50 block mb-2">Subir Logo (PNG/JPG)</label>
                     <form onSubmit={handleUploadLogo} className="flex gap-2">
                       <input 
+                        ref={logoFileInputRef}
                         type="file"
                         accept="image/png, image/jpeg, image/jpg, image/webp"
                         onChange={(e) => setLogoFile(e.target.files?.[0] || null)}

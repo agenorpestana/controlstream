@@ -198,10 +198,23 @@ const storage = multer.diskStorage({
     cb(null, uploadsDir);
   },
   filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`);
+    const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+    cb(null, `${Date.now()}-${safeName}`);
   }
 });
-const upload = multer({ storage });
+const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } });
+
+const handleUpload = (fieldName: string) => {
+  return (req: any, res: any, next: any) => {
+    upload.single(fieldName)(req, res, (err: any) => {
+      if (err) {
+        console.error(`[SERVER] Erro no upload (${fieldName}):`, err);
+        return res.status(400).json({ error: `Erro ao processar o arquivo enviado: ${err.message || err}` });
+      }
+      next();
+    });
+  };
+};
 
 process.on('uncaughtException', (err) => {
   console.error('UNCAUGHT EXCEPTION:', err);
@@ -212,6 +225,8 @@ process.on('unhandledRejection', (reason, promise) => {
 
 async function startServer() {
   const app = express();
+  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "50mb" }));
   app.use('/uploads', express.static(uploadsDir));
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
@@ -1001,7 +1016,7 @@ async function startServer() {
     res.json(getDb().videos);
   });
 
-  app.post("/api/videos", authenticate, upload.single("video"), (req, res) => {
+  app.post("/api/videos", authenticate, handleUpload("video"), (req, res) => {
     console.log("Recebendo requisição de upload de vídeo...");
     if (!req.file) {
       console.log("Nenhum arquivo recebido na requisição.");
@@ -1039,10 +1054,14 @@ async function startServer() {
     res.json(getDb().logos || []);
   });
 
-  app.post("/api/logos/upload", authenticate, upload.single("logo"), (req, res) => {
+  app.post("/api/logos/upload", authenticate, handleUpload("logo"), (req, res) => {
+    console.log("[SERVER] Recebendo requisição de upload de logo...");
     if (!req.file) {
+      console.log("[SERVER] Nenhum arquivo recebido na requisição de logo.");
       return res.status(400).json({ error: "Nenhum arquivo enviado" });
     }
+    console.log("[SERVER] Logo recebida com sucesso:", req.file.originalname, "Salva em:", req.file.path);
+
     const db = getDb();
     if (!db.logos) db.logos = [];
     const newLogo = {
@@ -1056,6 +1075,13 @@ async function startServer() {
       db.stream_status.active_logo_id = newLogo.id;
     }
     saveDb(db);
+
+    // Se a transmissão estiver ativa e a logo habilitada, reinicia a transmissão para aplicar
+    if (db.stream_status.is_streaming && db.stream_status.logo_enabled && (db.stream_status.current_source_type === "camera" || db.stream_status.current_source_type === "video")) {
+      console.log("[SERVER] Reiniciando transmissão para exibir a nova logomarca enviada");
+      startStream(db.stream_status.current_source_type, db.stream_status.current_source_id);
+    }
+
     io.emit("stream_status", db.stream_status);
     res.json({ success: true, logo: newLogo, logos: db.logos });
   });
