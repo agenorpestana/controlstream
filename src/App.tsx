@@ -760,23 +760,9 @@ export default function App() {
     const token = localStorage.getItem('token');
     setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] Solicitando troca de stream para: ${type} (${id})...\n`]);
 
-    // No iOS (Safari WebKit), conexões HTTP/1.1 MJPEG de mídia ficam abertas continuamente e ocupam o limite de conexões do navegador (6).
-    // Pausamos temporariamente o attribute src das tags <img> de preview para que o iOS libere o socket de rede para a requisição POST de troca.
-    const pausedMjpegImgs: { img: HTMLImageElement; src: string }[] = [];
-    try {
-      document.querySelectorAll<HTMLImageElement>('img[src*="/mjpeg"]').forEach(img => {
-        if (img.src) {
-          pausedMjpegImgs.push({ img, src: img.src });
-          img.removeAttribute('src');
-        }
-      });
-    } catch (e) {
-      console.warn("Aviso ao pausar previews de vídeo para iOS:", e);
-    }
-
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 12000);
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
 
       const response = await fetch('/api/stream/switch', {
         method: 'POST',
@@ -821,22 +807,16 @@ export default function App() {
       }
     } catch (error: any) {
       const msg = error.name === 'AbortError' 
-        ? 'A câmera demorou para responder. Solicitando inicialização direta no servidor...' 
+        ? 'A câmera demorou muito para responder e parece estar offline. A transmissão não foi alterada.' 
         : `Erro ao conectar: ${error.message}`;
       setOfflineAlert(msg);
-      setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] AVISO NA TROCA DE STREAM: ${msg}\n`]);
+      setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] ERRO NA TROCA DE STREAM: ${msg}\n`]);
       setTimeout(() => setOfflineAlert(null), 8000);
     } finally {
-      // Restaurar as imagens de preview no iOS/Navegador
       setTimeout(() => {
-        pausedMjpegImgs.forEach(({ img, src }) => {
-          if (img) {
-            img.src = src;
-          }
-        });
         fetchData();
         setIsSwitching(false);
-      }, 500);
+      }, 1000);
     }
   };
 

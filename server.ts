@@ -1272,12 +1272,12 @@ async function startServer() {
   const checkCameraOnline = (rtspUrl: string): Promise<boolean> => {
     if (!rtspUrl) return Promise.resolve(false);
     const isRtmp = rtspUrl.startsWith("rtmp://") || rtspUrl.startsWith("rtmps://");
-    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-stimeout", "4000000"];
+    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp"];
     const probeArgs = [
       ...transportOpts,
       "-v", "error",
-      "-analyzeduration", "500000",
-      "-probesize", "500000",
+      "-analyzeduration", "1000000",
+      "-probesize", "1000000",
       "-show_entries", "stream=codec_type",
       "-of", "default=noprint_wrappers=1",
       rtspUrl
@@ -1289,26 +1289,24 @@ async function startServer() {
       try {
         proc = spawn("ffprobe", probeArgs);
       } catch (e) {
-        return resolve(true);
+        return resolve(false);
       }
 
       const timer = setTimeout(() => {
         try { proc.kill("SIGKILL"); } catch (e) {}
-        // Se estourar o tempo de teste da sonda, permite a troca para que o FFmpeg de transmissão tente conectar
-        resolve(true);
-      }, 4500);
+        resolve(out.toLowerCase().includes("video") || out.toLowerCase().includes("audio"));
+      }, 2500);
 
       if (proc.stdout) {
         proc.stdout.on("data", (d: any) => { out += d.toString(); });
       }
-      proc.on("close", (code) => {
+      proc.on("close", () => {
         clearTimeout(timer);
-        const hasInfo = out.toLowerCase().includes("video") || out.toLowerCase().includes("audio");
-        resolve(code === 0 || hasInfo || true);
+        resolve(out.toLowerCase().includes("video") || out.toLowerCase().includes("audio"));
       });
       proc.on("error", () => {
         clearTimeout(timer);
-        resolve(true);
+        resolve(false);
       });
     });
   };
