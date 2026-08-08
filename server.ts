@@ -111,6 +111,7 @@ const initDb = () => {
         { id: 2, name: "Câmera 02", rtsp_url: "rtsp://demo:demo@static.cartesian.io:554/live/ch0", is_active: true }
       ],
       videos: [],
+      logos: [],
       stream_status: { 
         current_source_type: "none", 
         current_source_id: null, 
@@ -125,16 +126,23 @@ const initDb = () => {
         score_a: 0,
         score_b: 0,
         timer_seconds: 0,
-        timer_running: false
+        timer_running: false,
+        logo_enabled: false,
+        active_logo_id: null,
+        logo_position: "top_right"
       }
     }, null, 2));
   }
   dbCache = JSON.parse(fs.readFileSync(DB_FILE, "utf-8"));
   
-  // Ensure default stream status fields exist for sports overlay and domain
+  // Ensure default stream status fields exist for sports overlay, domain, and logo
   let updated = false;
   if (!dbCache.stream_status) {
     dbCache.stream_status = {};
+  }
+  if (!dbCache.logos) {
+    dbCache.logos = [];
+    updated = true;
   }
   if (dbCache.stream_status.system_domain === undefined || dbCache.stream_status.system_domain === "centralitl.unityautomacoes.com.br") {
     dbCache.stream_status.system_domain = "";
@@ -149,6 +157,12 @@ const initDb = () => {
     dbCache.stream_status.score_b = 0;
     dbCache.stream_status.timer_seconds = 0;
     dbCache.stream_status.timer_running = false;
+    updated = true;
+  }
+  if (dbCache.stream_status.logo_enabled === undefined) {
+    dbCache.stream_status.logo_enabled = false;
+    dbCache.stream_status.active_logo_id = null;
+    dbCache.stream_status.logo_position = "top_right";
     updated = true;
   }
   if (updated) {
@@ -198,6 +212,7 @@ process.on('unhandledRejection', (reason, promise) => {
 
 async function startServer() {
   const app = express();
+  app.use('/uploads', express.static(uploadsDir));
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
     cors: {
@@ -450,57 +465,93 @@ async function startServer() {
         mappingArgs = ["-map", "0:v:0", "-map", "0:a:0?"]; 
       }
 
-      let vfFilters = "fps=30,format=yuv420p";
-      
-      if ((type === "camera" || type === "video") && (db.stream_status.scoreboard_enabled || db.stream_status.timer_enabled)) {
-        writeSportsFiles(db.stream_status);
-        
-        const escFontPath = fontPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-        const fontFileOpt = fs.existsSync(fontPath) && fs.statSync(fontPath).size > 1000 ? `:fontfile='${escFontPath}'` : "";
-        let sportsFilters = [];
-        
-        if (db.stream_status.scoreboard_enabled) {
-          // Semi-transparent dark background card (Width: 320, Height: 42)
-          sportsFilters.push("drawbox=x=40:y=40:w=320:h=42:color=black@0.85:t=fill");
-          // Yellow neon border on the left
-          sportsFilters.push("drawbox=x=40:y=40:w=4:h=42:color=0xEAB308:t=fill");
-          
-          // Team A Name (drawn at fixed left position x=75, y=52, left-aligned)
-          sportsFilters.push(`drawtext=textfile=teama.txt:reload=1:x=75:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
-          // Score A Box & value (fixed x=160, y=50)
-          sportsFilters.push(`drawtext=textfile=scorea.txt:reload=1:x=160:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
-          
-          // Visual Divider
-          sportsFilters.push(`drawtext=text='-':x=198:y=52:fontcolor=white@0.4:fontsize=16${fontFileOpt}`);
-          
-          // Score B Box & value (fixed x=224, y=50)
-          sportsFilters.push(`drawtext=textfile=scoreb.txt:reload=1:x=224:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
-          // Team B Name (drawn at fixed position x=265, y=52)
-          sportsFilters.push(`drawtext=textfile=teamb.txt:reload=1:x=265:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
+      let filterArgs: string[] = [];
+      const logoEnabled = db.stream_status.logo_enabled;
+      const activeLogoId = db.stream_status.active_logo_id;
+      const logoPosition = db.stream_status.logo_position || 'top_right';
+      const activeLogo = (db.logos || []).find((l: any) => l.id === activeLogoId);
+      let logoPath = activeLogo ? path.join(process.cwd(), activeLogo.file_path) : null;
+      if (logoPath && !fs.existsSync(logoPath)) logoPath = null;
+
+      if (logoEnabled && logoPath) {
+        let logoInputIndex = 0;
+        for (let i = 0; i < inputArgs.length; i++) {
+          if (inputArgs[i] === "-i") logoInputIndex++;
         }
         
-        if (db.stream_status.timer_enabled) {
+        inputArgs.push("-i", logoPath);
+
+        let overlayPos = "main_w-overlay_w-30:30"; // default top_right
+        if (logoPosition === "top_left") overlayPos = "30:30";
+        else if (logoPosition === "bottom_left") overlayPos = "30:main_h-overlay_h-30";
+        else if (logoPosition === "bottom_right") overlayPos = "main_w-overlay_w-30:main_h-overlay_h-30";
+
+        let sportsPart = "";
+        if ((type === "camera" || type === "video") && (db.stream_status.scoreboard_enabled || db.stream_status.timer_enabled)) {
+          writeSportsFiles(db.stream_status);
+          const escFontPath = fontPath.replace(/\\/g, "/").replace(/:/g, "\\:");
+          const fontFileOpt = fs.existsSync(fontPath) && fs.statSync(fontPath).size > 1000 ? `:fontfile='${escFontPath}'` : "";
+          let sportsFilters = [];
           if (db.stream_status.scoreboard_enabled) {
-            // Attached timer block on the right (x=366, width:80, height:42)
-            sportsFilters.push("drawbox=x=366:y=40:w=80:h=42:color=0xEAB308:t=fill");
-            // Timer text (drawn on the yellow box, centered around 406 - starting at 384)
-            sportsFilters.push(`drawtext=textfile=timer.txt:reload=1:x=384:y=52:fontcolor=black:fontsize=16${fontFileOpt}`);
-          } else {
-            // Standalone timer block (x=40, width:90, height:42)
-            sportsFilters.push("drawbox=x=40:y=40:w=90:h=42:color=0xEAB308:t=fill");
-            // Timer text (centered around 85 - starting at 63)
-            sportsFilters.push(`drawtext=textfile=timer.txt:reload=1:x=63:y=52:fontcolor=black:fontsize=17${fontFileOpt}`);
+            sportsFilters.push("drawbox=x=40:y=40:w=320:h=42:color=black@0.85:t=fill");
+            sportsFilters.push("drawbox=x=40:y=40:w=4:h=42:color=0xEAB308:t=fill");
+            sportsFilters.push(`drawtext=textfile=teama.txt:reload=1:x=75:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
+            sportsFilters.push(`drawtext=textfile=scorea.txt:reload=1:x=160:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
+            sportsFilters.push(`drawtext=text='-':x=198:y=52:fontcolor=white@0.4:fontsize=16${fontFileOpt}`);
+            sportsFilters.push(`drawtext=textfile=scoreb.txt:reload=1:x=224:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
+            sportsFilters.push(`drawtext=textfile=teamb.txt:reload=1:x=265:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
           }
+          if (db.stream_status.timer_enabled) {
+            if (db.stream_status.scoreboard_enabled) {
+              sportsFilters.push("drawbox=x=366:y=40:w=80:h=42:color=0xEAB308:t=fill");
+              sportsFilters.push(`drawtext=textfile=timer.txt:reload=1:x=384:y=52:fontcolor=black:fontsize=16${fontFileOpt}`);
+            } else {
+              sportsFilters.push("drawbox=x=40:y=40:w=90:h=42:color=0xEAB308:t=fill");
+              sportsFilters.push(`drawtext=textfile=timer.txt:reload=1:x=63:y=52:fontcolor=black:fontsize=17${fontFileOpt}`);
+            }
+          }
+          sportsPart = "," + sportsFilters.join(",");
         }
-        
-        vfFilters += "," + sportsFilters.join(",");
+
+        const filterComplex = `[0:v]fps=30,format=yuv420p${sportsPart}[v_base];[${logoInputIndex}:v]scale=140:-1[scaled_logo];[v_base][scaled_logo]overlay=${overlayPos}[v_out]`;
+        filterArgs = ["-filter_complex", filterComplex];
+
+        mappingArgs = mappingArgs.map(m => m === "0:v:0" ? "[v_out]" : m);
+      } else {
+        let vfFilters = "fps=30,format=yuv420p";
+        if ((type === "camera" || type === "video") && (db.stream_status.scoreboard_enabled || db.stream_status.timer_enabled)) {
+          writeSportsFiles(db.stream_status);
+          const escFontPath = fontPath.replace(/\\/g, "/").replace(/:/g, "\\:");
+          const fontFileOpt = fs.existsSync(fontPath) && fs.statSync(fontPath).size > 1000 ? `:fontfile='${escFontPath}'` : "";
+          let sportsFilters = [];
+          if (db.stream_status.scoreboard_enabled) {
+            sportsFilters.push("drawbox=x=40:y=40:w=320:h=42:color=black@0.85:t=fill");
+            sportsFilters.push("drawbox=x=40:y=40:w=4:h=42:color=0xEAB308:t=fill");
+            sportsFilters.push(`drawtext=textfile=teama.txt:reload=1:x=75:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
+            sportsFilters.push(`drawtext=textfile=scorea.txt:reload=1:x=160:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
+            sportsFilters.push(`drawtext=text='-':x=198:y=52:fontcolor=white@0.4:fontsize=16${fontFileOpt}`);
+            sportsFilters.push(`drawtext=textfile=scoreb.txt:reload=1:x=224:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
+            sportsFilters.push(`drawtext=textfile=teamb.txt:reload=1:x=265:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
+          }
+          if (db.stream_status.timer_enabled) {
+            if (db.stream_status.scoreboard_enabled) {
+              sportsFilters.push("drawbox=x=366:y=40:w=80:h=42:color=0xEAB308:t=fill");
+              sportsFilters.push(`drawtext=textfile=timer.txt:reload=1:x=384:y=52:fontcolor=black:fontsize=16${fontFileOpt}`);
+            } else {
+              sportsFilters.push("drawbox=x=40:y=40:w=90:h=42:color=0xEAB308:t=fill");
+              sportsFilters.push(`drawtext=textfile=timer.txt:reload=1:x=63:y=52:fontcolor=black:fontsize=17${fontFileOpt}`);
+            }
+          }
+          vfFilters += "," + sportsFilters.join(",");
+        }
+        filterArgs = ["-vf", vfFilters];
       }
 
       const rtmpUrl = `rtmp://a.rtmp.youtube.com/live2/${youtubeKey}`;
       const args = [
         ...inputArgs,
         ...mappingArgs,
-        "-vf", vfFilters,
+        ...filterArgs,
         "-c:v", "libx264",
         "-preset", "superfast", // Superfast preset for optimal CPU usage and stability
         "-profile:v", "high",
@@ -981,6 +1032,85 @@ async function startServer() {
       saveDb(db);
     }
     res.json({ success: true });
+  });
+
+  // Logos Endpoints
+  app.get("/api/logos", authenticate, (req, res) => {
+    res.json(getDb().logos || []);
+  });
+
+  app.post("/api/logos/upload", authenticate, upload.single("logo"), (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: "Nenhum arquivo enviado" });
+    }
+    const db = getDb();
+    if (!db.logos) db.logos = [];
+    const newLogo = {
+      id: Date.now(),
+      name: req.file.originalname,
+      file_path: `uploads/${req.file.filename}`,
+      created_at: new Date()
+    };
+    db.logos.push(newLogo);
+    if (!db.stream_status.active_logo_id) {
+      db.stream_status.active_logo_id = newLogo.id;
+    }
+    saveDb(db);
+    io.emit("stream_status", db.stream_status);
+    res.json({ success: true, logo: newLogo, logos: db.logos });
+  });
+
+  app.delete("/api/logos/:id", authenticate, (req, res) => {
+    const db = getDb();
+    const logoId = parseInt(req.params.id);
+    const logo = (db.logos || []).find((l: any) => l.id === logoId);
+    if (logo) {
+      const fullPath = path.join(process.cwd(), logo.file_path);
+      if (fs.existsSync(fullPath)) {
+        try { fs.unlinkSync(fullPath); } catch (e) {}
+      }
+      db.logos = db.logos.filter((l: any) => l.id !== logoId);
+      if (db.stream_status.active_logo_id === logoId) {
+        db.stream_status.active_logo_id = db.logos[0]?.id || null;
+      }
+      saveDb(db);
+      io.emit("stream_status", db.stream_status);
+
+      if (db.stream_status.is_streaming && db.stream_status.logo_enabled && (db.stream_status.current_source_type === "camera" || db.stream_status.current_source_type === "video")) {
+        console.log("[SERVER] Reiniciando transmissão devido a exclusão da logo ativa");
+        startStream(db.stream_status.current_source_type, db.stream_status.current_source_id);
+      }
+    }
+    res.json({ success: true, logos: db.logos || [] });
+  });
+
+  app.post("/api/status/logo", authenticate, (req, res) => {
+    const { enabled, logo_id, position } = req.body;
+    const db = getDb();
+    const wasEnabled = db.stream_status.logo_enabled;
+    const wasLogoId = db.stream_status.active_logo_id;
+    const wasPosition = db.stream_status.logo_position;
+
+    if (enabled !== undefined) db.stream_status.logo_enabled = enabled;
+    if (logo_id !== undefined) db.stream_status.active_logo_id = logo_id;
+    if (position !== undefined) db.stream_status.logo_position = position;
+
+    saveDb(db);
+
+    let needsRestart = false;
+    if (db.stream_status.is_streaming && (db.stream_status.current_source_type === "camera" || db.stream_status.current_source_type === "video")) {
+      if (enabled !== undefined && enabled !== wasEnabled) needsRestart = true;
+      if (logo_id !== undefined && logo_id !== wasLogoId) needsRestart = true;
+      if (position !== undefined && position !== wasPosition) needsRestart = true;
+    }
+
+    if (needsRestart) {
+      console.log("[SERVER] Reiniciando transmissão para aplicar alteração da logomarca");
+      startStream(db.stream_status.current_source_type, db.stream_status.current_source_id);
+    }
+
+    io.emit("stream_status", db.stream_status);
+    res.json({ success: true, status: db.stream_status });
   });
 
   app.get("/api/status", authenticate, (req, res) => {

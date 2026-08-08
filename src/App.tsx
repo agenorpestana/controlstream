@@ -18,6 +18,13 @@ interface VideoData {
   created_at: string;
 }
 
+interface LogoData {
+  id: number;
+  name: string;
+  file_path: string;
+  created_at: string;
+}
+
 interface StreamStatus {
   current_source_type: 'camera' | 'video' | 'web' | 'none';
   current_source_id: number | string | null;
@@ -33,6 +40,9 @@ interface StreamStatus {
   score_b?: number;
   timer_seconds?: number;
   timer_running?: boolean;
+  logo_enabled?: boolean;
+  active_logo_id?: number | null;
+  logo_position?: 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right';
 }
 
 const CameraPreview = ({ camId, className = '', quality = 'high' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
@@ -144,6 +154,9 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [cameras, setCameras] = useState<CameraData[]>([]);
   const [videos, setVideos] = useState<VideoData[]>([]);
+  const [logos, setLogos] = useState<LogoData[]>([]);
+  const [logoFile, setLogoFile] = useState<File | null>(null);
+  const [isUploadingLogo, setIsUploadingLogo] = useState(false);
   const [status, setStatus] = useState<StreamStatus | null>(null);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'cameras' | 'videos' | 'settings'>('dashboard');
   const [newCam, setNewCam] = useState({ name: '', rtsp_url: '' });
@@ -589,14 +602,16 @@ export default function App() {
     const headers = { Authorization: `Bearer ${token}` };
 
     try {
-      const [camsRes, vidsRes, statusRes] = await Promise.all([
+      const [camsRes, vidsRes, statusRes, logosRes] = await Promise.all([
         fetch('/api/cameras', { headers }),
         fetch('/api/videos', { headers }),
-        fetch('/api/status', { headers })
+        fetch('/api/status', { headers }),
+        fetch('/api/logos', { headers })
       ]);
       
       if (camsRes.ok) setCameras(await camsRes.json());
       if (vidsRes.ok) setVideos(await vidsRes.json());
+      if (logosRes.ok) setLogos(await logosRes.json());
       if (statusRes.ok) {
         const s = await statusRes.json();
         setStatus(s);
@@ -623,6 +638,77 @@ export default function App() {
       }
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const handleUploadLogo = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!logoFile) return;
+
+    setIsUploadingLogo(true);
+    const formData = new FormData();
+    formData.append('logo', logoFile);
+
+    const token = localStorage.getItem('token');
+    try {
+      const res = await fetch('/api/logos/upload', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        if (data.logos) setLogos(data.logos);
+        setLogoFile(null);
+      } else {
+        alert(data.error || 'Erro ao enviar logomarca');
+      }
+    } catch (err) {
+      console.error("Erro no upload da logo:", err);
+      alert("Erro ao enviar imagem da logo");
+    } finally {
+      setIsUploadingLogo(false);
+    }
+  };
+
+  const handleDeleteLogo = async (id: number) => {
+    if (!confirm("Deseja realmente excluir esta logomarca?")) return;
+    const token = localStorage.getItem('token');
+    try {
+      const res = await fetch(`/api/logos/${id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (res.ok && data.logos) {
+        setLogos(data.logos);
+      }
+    } catch (err) {
+      console.error("Erro ao excluir logo:", err);
+    }
+  };
+
+  const handleUpdateLogoStatus = async (enabled: boolean, logoId?: number | null, position?: string) => {
+    const token = localStorage.getItem('token');
+    try {
+      const res = await fetch('/api/status/logo', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          enabled,
+          logo_id: logoId,
+          position
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.status) {
+        setStatus(data.status);
+      }
+    } catch (err) {
+      console.error("Erro ao atualizar status da logo:", err);
     }
   };
 
@@ -1410,6 +1496,29 @@ export default function App() {
                             <p className="font-mono text-sm text-white/60">Fonte Atual: Câmera #{status.current_source_id}</p>
                           </div>
                         )}
+
+                        {/* Logo Overlay no Painel de Transmissão */}
+                        {status?.logo_enabled && status?.active_logo_id && (
+                          (() => {
+                            const activeLogo = logos.find(l => l.id === status.active_logo_id);
+                            if (!activeLogo) return null;
+                            let posClass = "top-3 right-3";
+                            if (status.logo_position === 'top_left') posClass = "top-3 left-3";
+                            else if (status.logo_position === 'bottom_left') posClass = "bottom-3 left-3";
+                            else if (status.logo_position === 'bottom_right') posClass = "bottom-3 right-3";
+
+                            return (
+                              <div className={`absolute ${posClass} pointer-events-none z-20`}>
+                                <img 
+                                  src={`/${activeLogo.file_path}`} 
+                                  alt="Logo Overlay" 
+                                  className="max-h-10 max-w-[120px] object-contain filter drop-shadow-[0_2px_8px_rgba(0,0,0,0.8)]"
+                                />
+                              </div>
+                            );
+                          })()
+                        )}
+
                         <div className="absolute top-4 right-4 flex gap-2">
                           {status.current_source_type === 'video' && isLocalStreaming && (
                             <button 
@@ -1629,6 +1738,144 @@ export default function App() {
                     >
                       Ver Todos os Vídeos
                     </button>
+                  </div>
+                </div>
+
+                {/* Painel de Marca d'Água / Logomarca */}
+                <div className="bg-[#151619] rounded-3xl border border-white/10 p-6 space-y-5">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-400">
+                      <Upload size={20} />
+                    </div>
+                    <div>
+                      <h3 className="text-base font-bold text-white">Logomarca no Vídeo</h3>
+                      <p className="text-xs text-white/40">Exibir marca d'água na transmissão ao vivo</p>
+                    </div>
+                  </div>
+
+                  {/* Toggle Ativar / Desativar */}
+                  <div className="flex items-center justify-between p-3.5 bg-black/30 rounded-2xl border border-white/5">
+                    <span className="text-xs font-semibold text-white/80">Exibir Marca no Ar</span>
+                    <button
+                      type="button"
+                      onClick={() => handleUpdateLogoStatus(!status?.logo_enabled, status?.active_logo_id, status?.logo_position || 'top_right')}
+                      className={`px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+                        status?.logo_enabled 
+                          ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20' 
+                          : 'bg-white/10 text-white/60 hover:bg-white/20'
+                      }`}
+                    >
+                      <div className={`w-2 h-2 rounded-full ${status?.logo_enabled ? 'bg-white animate-pulse' : 'bg-white/40'}`} />
+                      <span>{status?.logo_enabled ? 'LIGADA' : 'DESLIGADA'}</span>
+                    </button>
+                  </div>
+
+                  {/* Seleção de Canto */}
+                  <div>
+                    <label className="text-[11px] font-bold uppercase tracking-wider text-white/50 block mb-2">Posição da Logo no Vídeo</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {[
+                        { id: 'top_left', label: 'Sup. Esquerdo' },
+                        { id: 'top_right', label: 'Sup. Direito' },
+                        { id: 'bottom_left', label: 'Inf. Esquerdo' },
+                        { id: 'bottom_right', label: 'Inf. Direito' },
+                      ].map((pos) => {
+                        const isSelected = (status?.logo_position || 'top_right') === pos.id;
+                        return (
+                          <button
+                            key={pos.id}
+                            type="button"
+                            onClick={() => handleUpdateLogoStatus(status?.logo_enabled ?? false, status?.active_logo_id, pos.id as any)}
+                            className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-all text-center cursor-pointer ${
+                              isSelected 
+                                ? 'bg-emerald-500/20 border-emerald-500 text-emerald-400 font-bold' 
+                                : 'bg-black/20 border-white/5 text-white/60 hover:border-white/20 hover:text-white'
+                            }`}
+                          >
+                            {pos.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Enviar Nova Logo */}
+                  <div>
+                    <label className="text-[11px] font-bold uppercase tracking-wider text-white/50 block mb-2">Subir Logo (PNG/JPG)</label>
+                    <form onSubmit={handleUploadLogo} className="flex gap-2">
+                      <input 
+                        type="file"
+                        accept="image/png, image/jpeg, image/jpg, image/webp"
+                        onChange={(e) => setLogoFile(e.target.files?.[0] || null)}
+                        className="text-xs text-white/60 file:mr-2 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-white/10 file:text-white hover:file:bg-white/20 cursor-pointer bg-black/20 rounded-xl p-1.5 border border-white/5 flex-1 w-full"
+                      />
+                      <button
+                        type="submit"
+                        disabled={!logoFile || isUploadingLogo}
+                        className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:hover:bg-emerald-500 text-white font-bold text-xs rounded-xl transition-all flex items-center gap-1 shrink-0 cursor-pointer"
+                      >
+                        {isUploadingLogo ? <RefreshCw size={14} className="animate-spin" /> : <Upload size={14} />}
+                        <span>Enviar</span>
+                      </button>
+                    </form>
+                  </div>
+
+                  {/* Lista e Troca de Logos ao Vivo */}
+                  <div>
+                    <label className="text-[11px] font-bold uppercase tracking-wider text-white/50 block mb-2">Logos Cadastradas ({logos.length})</label>
+                    {logos.length === 0 ? (
+                      <div className="text-center py-4 border-2 border-dashed border-white/5 rounded-2xl">
+                        <p className="text-white/30 text-xs">Nenhuma logo enviada</p>
+                      </div>
+                    ) : (
+                      <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                        {logos.map((logo) => {
+                          const isActive = status?.active_logo_id === logo.id;
+                          return (
+                            <div 
+                              key={logo.id}
+                              className={`p-2.5 rounded-xl border flex items-center justify-between transition-all ${
+                                isActive 
+                                  ? 'bg-emerald-500/10 border-emerald-500/50' 
+                                  : 'bg-black/20 border-white/5 hover:border-white/20'
+                              }`}
+                            >
+                              <div className="flex items-center gap-3 overflow-hidden">
+                                <div className="w-10 h-10 rounded-lg bg-black/60 border border-white/10 flex items-center justify-center overflow-hidden shrink-0">
+                                  <img src={`/${logo.file_path}`} alt={logo.name} className="w-full h-full object-contain p-1" />
+                                </div>
+                                <div className="truncate">
+                                  <p className="text-xs font-bold text-white truncate">{logo.name}</p>
+                                  {isActive && (
+                                    <span className="text-[9px] font-mono text-emerald-400 uppercase tracking-wider font-bold">Logo Ativa</span>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                {!isActive && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleUpdateLogoStatus(status?.logo_enabled ?? true, logo.id, status?.logo_position || 'top_right')}
+                                    className="px-2.5 py-1 bg-white/10 hover:bg-emerald-500 hover:text-white text-white/80 font-bold text-[10px] rounded-lg transition-all cursor-pointer"
+                                  >
+                                    Usar Ao Vivo
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteLogo(logo.id)}
+                                  className="p-1.5 text-white/30 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all cursor-pointer"
+                                  title="Excluir logo"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 </div>
 
