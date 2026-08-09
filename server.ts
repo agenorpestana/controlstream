@@ -351,6 +351,7 @@ async function startServer() {
   let activeProbeProc: any = null;
   let activeHighQualityMjpegProc: any = null;
   let activeHighQualityCamId: number | null = null;
+  const camAudioCache: Record<number | string, boolean> = {};
 
   const startStream = async (type: "camera" | "video" | "web", id: number | string) => {
     // If a probe is already running, cancel it so the new request can execute immediately
@@ -363,8 +364,6 @@ async function startServer() {
     console.log(msg);
     
     try {
-      stopStream(true);
-      
       // Limpar logs antigos no servidor e avisar clientes
       ffmpegLogs = [];
       io.emit("ffmpeg_log_clear");
@@ -393,59 +392,71 @@ async function startServer() {
 
         const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
 
-        // Probe if camera stream has native audio track
-        const hasAudio = await new Promise<boolean>((resolve) => {
-          const probeArgs = isRtmp 
-            ? [
-                "-v", "error",
-                "-analyzeduration", "3000000",
-                "-probesize", "3000000",
-                "-show_entries", "stream=codec_type",
-                "-of", "default=noprint_wrappers=1",
-                cam.rtsp_url
-              ]
-            : [
-                "-rtsp_transport", "tcp",
-                "-v", "error",
-                "-analyzeduration", "3000000",
-                "-probesize", "3000000",
-                "-show_entries", "stream=codec_type",
-                "-of", "default=noprint_wrappers=1",
-                cam.rtsp_url
-              ];
-          
-          const proc = spawn("ffprobe", probeArgs);
-          activeProbeProc = proc;
-          let out = "";
-          proc.stdout.on("data", (d) => { out += d.toString(); });
-          const timer = setTimeout(() => {
-            try { proc.kill("SIGKILL"); } catch (e) {}
-            if (activeProbeProc === proc) activeProbeProc = null;
-            resolve(out.toLowerCase().includes("audio"));
-          }, 3500);
-          proc.on("close", () => {
-            clearTimeout(timer);
-            if (activeProbeProc === proc) activeProbeProc = null;
-            resolve(out.toLowerCase().includes("audio"));
+        // Fast probe or use cached audio presence to avoid 3.5s delay during camera switches
+        let hasAudio = cam.has_audio;
+        if (hasAudio === undefined && camAudioCache[cam.id] !== undefined) {
+          hasAudio = camAudioCache[cam.id];
+        }
+
+        if (hasAudio === undefined) {
+          hasAudio = await new Promise<boolean>((resolve) => {
+            const probeArgs = isRtmp 
+              ? [
+                  "-v", "error",
+                  "-analyzeduration", "500000",
+                  "-probesize", "500000",
+                  "-show_entries", "stream=codec_type",
+                  "-of", "default=noprint_wrappers=1",
+                  cam.rtsp_url
+                ]
+              : [
+                  "-rtsp_transport", "tcp",
+                  "-v", "error",
+                  "-analyzeduration", "500000",
+                  "-probesize", "500000",
+                  "-show_entries", "stream=codec_type",
+                  "-of", "default=noprint_wrappers=1",
+                  cam.rtsp_url
+                ];
+            
+            const proc = spawn("ffprobe", probeArgs);
+            activeProbeProc = proc;
+            let out = "";
+            proc.stdout.on("data", (d) => { out += d.toString(); });
+            const timer = setTimeout(() => {
+              try { proc.kill("SIGKILL"); } catch (e) {}
+              if (activeProbeProc === proc) activeProbeProc = null;
+              resolve(out.toLowerCase().includes("audio"));
+            }, 1000);
+            proc.on("close", () => {
+              clearTimeout(timer);
+              if (activeProbeProc === proc) activeProbeProc = null;
+              resolve(out.toLowerCase().includes("audio"));
+            });
           });
-        });
+          camAudioCache[cam.id] = hasAudio;
+          cam.has_audio = hasAudio;
+          saveDb(db);
+        }
 
         if (isRtmp) {
           inputArgs = [
             "-thread_queue_size", "4096",
             "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
-            "-analyzeduration", "3000000", 
-            "-probesize", "3000000", 
+            "-fpsprobesize", "0",
+            "-analyzeduration", "500000", 
+            "-probesize", "500000", 
             "-i", cam.rtsp_url
           ];
         } else {
           inputArgs = [
             "-thread_queue_size", "4096",
             "-rtsp_transport", "tcp", 
-            "-max_delay", "500000",
+            "-flags", "+low_delay",
             "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
-            "-analyzeduration", "3000000", 
-            "-probesize", "3000000", 
+            "-fpsprobesize", "0",
+            "-analyzeduration", "500000", 
+            "-probesize", "500000", 
             "-i", cam.rtsp_url
           ];
         }
@@ -573,13 +584,14 @@ async function startServer() {
         ...mappingArgs,
         ...filterArgs,
         "-c:v", "libx264",
-        "-preset", "superfast", // Superfast preset for optimal CPU usage and stability
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
         "-profile:v", "high",
         "-level", "4.1",
         "-pix_fmt", "yuv420p",
         "-r", "30",
-        "-g", "60",
-        "-keyint_min", "60",
+        "-g", "30",
+        "-keyint_min", "30",
         "-sc_threshold", "0", 
         "-b:v", "4500k", // High quality 4.5 Mbps bitrate
         "-maxrate", "5000k",
@@ -590,7 +602,8 @@ async function startServer() {
         "-ac", "2", // Guarantee stereo audio channels for YouTube
         "-f", "flv",
         "-flvflags", "no_duration_filesize",
-        "-rtmp_buffer", "2000",
+        "-flush_packets", "1",
+        "-rtmp_buffer", "100",
         "-rtmp_live", "live",
         "-max_muxing_queue_size", "4096",
         "-threads", "0",
@@ -599,6 +612,9 @@ async function startServer() {
 
       console.log("Iniciando FFmpeg:", args.join(" "));
       addLog(`Comando: ffmpeg ${args.join(" ")}\n`);
+
+      // Kill previous ffmpeg process RIGHT BEFORE spawning the new one to minimize stream offline window
+      stopStream(true);
 
       try {
         ffmpegProcess = spawn("ffmpeg", args);
@@ -1286,15 +1302,21 @@ async function startServer() {
     res.json({ success: true, status: db.stream_status });
   });
 
-  const checkCameraOnline = (rtspUrl: string): Promise<boolean> => {
+  const checkCameraOnline = (rtspUrl: string, camId?: number): Promise<boolean> => {
     if (!rtspUrl) return Promise.resolve(false);
+    
+    // Se o snapshot desta câmera estiver em cache e recente (< 5s), a câmera está online com certeza!
+    if (camId && snapshotCaches[camId] && snapshotCaches[camId].data.length > 0 && (Date.now() - snapshotCaches[camId].timestamp < 5000)) {
+      return Promise.resolve(true);
+    }
+
     const isRtmp = rtspUrl.startsWith("rtmp://") || rtspUrl.startsWith("rtmps://");
     const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp"];
     const probeArgs = [
       ...transportOpts,
       "-v", "error",
-      "-analyzeduration", "1000000",
-      "-probesize", "1000000",
+      "-analyzeduration", "500000",
+      "-probesize", "500000",
       "-show_entries", "stream=codec_type",
       "-of", "default=noprint_wrappers=1",
       rtspUrl
@@ -1312,7 +1334,7 @@ async function startServer() {
       const timer = setTimeout(() => {
         try { proc.kill("SIGKILL"); } catch (e) {}
         resolve(out.toLowerCase().includes("video") || out.toLowerCase().includes("audio"));
-      }, 2500);
+      }, 1000);
 
       if (proc.stdout) {
         proc.stdout.on("data", (d: any) => { out += d.toString(); });
@@ -1341,7 +1363,7 @@ async function startServer() {
       const shouldBlockOffline = db.stream_status.block_offline_switch !== false;
       if (shouldBlockOffline) {
         addLog(`[SERVER] Verificando sinal da câmera "${cam.name}" (ID ${cam.id})...\n`);
-        const isOnline = await checkCameraOnline(cam.rtsp_url);
+        const isOnline = await checkCameraOnline(cam.rtsp_url, cam.id);
         if (!isOnline) {
           addLog(`[SERVER] RECUSADO: Câmera "${cam.name}" está OFFLINE ou sem sinal de vídeo.\n`);
           return res.status(400).json({ error: `A câmera "${cam.name}" está OFFLINE ou sem sinal de vídeo. A transmissão não foi alterada.` });
