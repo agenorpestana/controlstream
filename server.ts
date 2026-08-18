@@ -442,7 +442,9 @@ async function startServer() {
       }
 
       let inputArgs: string[] = [];
-      let mappingArgs: string[] = [];
+      let nextInputIndex = 0;
+      let mainInputIndex = 0;
+      let hasAudio = false;
       
       if (type === "camera") {
         const cam = db.cameras.find((c: any) => c.id === id);
@@ -454,14 +456,14 @@ async function startServer() {
 
         const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
 
-        // Fast probe or use cached audio presence to avoid 3.5s delay during camera switches
-        let hasAudio = cam.has_audio;
-        if (hasAudio === undefined && camAudioCache[cam.id] !== undefined) {
-          hasAudio = camAudioCache[cam.id];
+        // Fast probe or use cached audio presence to avoid delay during camera switches
+        let probedAudio = cam.has_audio;
+        if (probedAudio === undefined && camAudioCache[cam.id] !== undefined) {
+          probedAudio = camAudioCache[cam.id];
         }
 
-        if (hasAudio === undefined) {
-          hasAudio = await new Promise<boolean>((resolve) => {
+        if (probedAudio === undefined) {
+          probedAudio = await new Promise<boolean>((resolve) => {
             const probeArgs = isRtmp 
               ? [
                   "-v", "error",
@@ -496,22 +498,23 @@ async function startServer() {
               resolve(out.toLowerCase().includes("audio"));
             });
           });
-          camAudioCache[cam.id] = hasAudio;
-          cam.has_audio = hasAudio;
+          camAudioCache[cam.id] = probedAudio;
+          cam.has_audio = probedAudio;
           saveDb(db);
         }
+        hasAudio = Boolean(probedAudio);
 
         if (isRtmp) {
-          inputArgs = [
+          inputArgs.push(
             "-thread_queue_size", "4096",
             "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
             "-fpsprobesize", "0",
             "-analyzeduration", "500000", 
             "-probesize", "500000", 
             "-i", cam.rtsp_url
-          ];
+          );
         } else {
-          inputArgs = [
+          inputArgs.push(
             "-thread_queue_size", "4096",
             "-rtsp_transport", "tcp", 
             "-flags", "+low_delay",
@@ -520,78 +523,44 @@ async function startServer() {
             "-analyzeduration", "500000", 
             "-probesize", "500000", 
             "-i", cam.rtsp_url
-          ];
+          );
         }
-
-        if (db.stream_status.mic_narration_enabled) {
-          const narrationUrl = `http://127.0.0.1:${PORT}/internal/narration-audio-pcm`;
-          inputArgs.push("-f", "s16le", "-ar", "44100", "-ac", "2", "-i", narrationUrl);
-          const narrationInputIndex = 1;
-
-          if (db.stream_status.mic_narration_mode === "mix" && hasAudio) {
-            addLog("Áudio MISTO: Narração do Computador + Áudio Ambiente da Câmera.\n");
-            // amix will mix camera audio (0:a) and narration (1:a)
-            mappingArgs = [
-              "-map", "0:v:0",
-              "-map", "1:a:0",
-              "-af", "aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo"
-            ];
-          } else {
-            addLog("Áudio da Narração do Computador selecionado para a transmissão.\n");
-            mappingArgs = [
-              "-map", "0:v:0",
-              "-map", `${narrationInputIndex}:a:0`,
-              "-af", "aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo"
-            ];
-          }
-        } else if (hasAudio) {
-          addLog("Áudio detectado na câmera! Transmitindo áudio nativo resincronizado para AAC 44.1kHz Estéreo.\n");
-          mappingArgs = [
-            "-map", "0:v:0", 
-            "-map", "0:a:0?", 
-            "-af", "aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo"
-          ];
-        } else {
-          addLog("Nenhum canal de áudio detectado na câmera. Utilizando faixa de áudio silenciosa para o YouTube.\n");
-          inputArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100");
-          mappingArgs = ["-map", "0:v:0", "-map", "1:a:0"];
-        }
+        mainInputIndex = nextInputIndex++;
       } else if (type === "video") {
         const vid = db.videos.find((v: any) => v.id === id);
         if (!vid) return;
         const videoPath = path.join(process.cwd(), vid.file_path);
         
         if (db.stream_status.loop_video) {
-          inputArgs = ["-stream_loop", "-1"];
+          inputArgs.push("-stream_loop", "-1");
         }
         inputArgs.push("-re", "-fflags", "+genpts", "-i", videoPath);
-
-        if (db.stream_status.mic_narration_enabled) {
-          const narrationUrl = `http://127.0.0.1:${PORT}/internal/narration-audio-pcm`;
-          inputArgs.push("-f", "s16le", "-ar", "44100", "-ac", "2", "-i", narrationUrl);
-          addLog("Áudio de Narração do Computador ativo sobre o vídeo comercial.\n");
-          mappingArgs = [
-            "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-af", "aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo"
-          ];
-        } else {
-          mappingArgs = ["-map", "0:v:0", "-map", "0:a:0?"];
-        }
+        mainInputIndex = nextInputIndex++;
+        hasAudio = true;
       } else if (type === "web") {
-        inputArgs = [
+        inputArgs.push(
           "-use_wallclock_as_timestamps", "1",
           "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
           "-thread_queue_size", "16384",
-          "-probesize", "5M", // Balanced for fast start but stable track metadata detection
-          "-analyzeduration", "5M", // Balanced analyzeduration
+          "-probesize", "5M",
+          "-analyzeduration", "5M",
           "-f", "webm",
           "-i", "pipe:0"
-        ];
-        mappingArgs = ["-map", "0:v:0", "-map", "0:a:0?"]; 
+        );
+        mainInputIndex = nextInputIndex++;
+        hasAudio = true;
       }
 
-      let filterArgs: string[] = [];
+      // Add Narration Audio input if enabled
+      let narrationInputIndex = -1;
+      if (db.stream_status.mic_narration_enabled && type !== "web") {
+        const narrationUrl = `http://127.0.0.1:${PORT}/internal/narration-audio-pcm`;
+        inputArgs.push("-f", "s16le", "-ar", "44100", "-ac", "2", "-i", narrationUrl);
+        narrationInputIndex = nextInputIndex++;
+      }
+
+      // Add Logo image input if enabled
+      let logoInputIndex = -1;
       const logoEnabled = db.stream_status.logo_enabled;
       const activeLogoId = db.stream_status.active_logo_id;
       const logoPosition = db.stream_status.logo_position || 'top_right';
@@ -600,78 +569,85 @@ async function startServer() {
       if (logoPath && !fs.existsSync(logoPath)) logoPath = null;
 
       if (logoEnabled && logoPath) {
-        let logoInputIndex = 0;
-        for (let i = 0; i < inputArgs.length; i++) {
-          if (inputArgs[i] === "-i") logoInputIndex++;
-        }
-        
         inputArgs.push("-i", logoPath);
+        logoInputIndex = nextInputIndex++;
+      }
 
-        let overlayPos = "main_w-overlay_w-30:30"; // default top_right
+      // Add Silent audio generator if camera has no audio AND narration is not enabled
+      let silenceInputIndex = -1;
+      if (!hasAudio && narrationInputIndex === -1 && type !== "web") {
+        inputArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100");
+        silenceInputIndex = nextInputIndex++;
+      }
+
+      // Build -filter_complex for unified video and audio pipelines
+      let filterComplexParts: string[] = [];
+      let videoFilters: string[] = ["fps=30,format=yuv420p"];
+
+      if ((type === "camera" || type === "video") && (db.stream_status.scoreboard_enabled || db.stream_status.timer_enabled)) {
+        writeSportsFiles(db.stream_status);
+        const escFontPath = fontPath.replace(/\\/g, "/").replace(/:/g, "\\:");
+        const fontFileOpt = fs.existsSync(fontPath) && fs.statSync(fontPath).size > 1000 ? `:fontfile='${escFontPath}'` : "";
+        if (db.stream_status.scoreboard_enabled) {
+          videoFilters.push("drawbox=x=40:y=40:w=320:h=42:color=black@0.85:t=fill");
+          videoFilters.push("drawbox=x=40:y=40:w=4:h=42:color=0xEAB308:t=fill");
+          videoFilters.push(`drawtext=textfile=teama.txt:reload=1:x=75:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
+          videoFilters.push(`drawtext=textfile=scorea.txt:reload=1:x=160:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
+          videoFilters.push(`drawtext=text='-':x=198:y=52:fontcolor=white@0.4:fontsize=16${fontFileOpt}`);
+          videoFilters.push(`drawtext=textfile=scoreb.txt:reload=1:x=224:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
+          videoFilters.push(`drawtext=textfile=teamb.txt:reload=1:x=265:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
+        }
+        if (db.stream_status.timer_enabled) {
+          if (db.stream_status.scoreboard_enabled) {
+            videoFilters.push("drawbox=x=366:y=40:w=80:h=42:color=0xEAB308:t=fill");
+            videoFilters.push(`drawtext=textfile=timer.txt:reload=1:x=384:y=52:fontcolor=black:fontsize=16${fontFileOpt}`);
+          } else {
+            videoFilters.push("drawbox=x=40:y=40:w=90:h=42:color=0xEAB308:t=fill");
+            videoFilters.push(`drawtext=textfile=timer.txt:reload=1:x=63:y=52:fontcolor=black:fontsize=17${fontFileOpt}`);
+          }
+        }
+      }
+
+      let videoOutLabel = "[v_base]";
+      filterComplexParts.push(`[${mainInputIndex}:v]${videoFilters.join(",")}${videoOutLabel}`);
+
+      if (logoInputIndex !== -1) {
+        let overlayPos = "main_w-overlay_w-30:30";
         if (logoPosition === "top_left") overlayPos = "30:30";
         else if (logoPosition === "bottom_left") overlayPos = "30:main_h-overlay_h-30";
         else if (logoPosition === "bottom_right") overlayPos = "main_w-overlay_w-30:main_h-overlay_h-30";
 
-        let sportsPart = "";
-        if ((type === "camera" || type === "video") && (db.stream_status.scoreboard_enabled || db.stream_status.timer_enabled)) {
-          writeSportsFiles(db.stream_status);
-          const escFontPath = fontPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-          const fontFileOpt = fs.existsSync(fontPath) && fs.statSync(fontPath).size > 1000 ? `:fontfile='${escFontPath}'` : "";
-          let sportsFilters = [];
-          if (db.stream_status.scoreboard_enabled) {
-            sportsFilters.push("drawbox=x=40:y=40:w=320:h=42:color=black@0.85:t=fill");
-            sportsFilters.push("drawbox=x=40:y=40:w=4:h=42:color=0xEAB308:t=fill");
-            sportsFilters.push(`drawtext=textfile=teama.txt:reload=1:x=75:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
-            sportsFilters.push(`drawtext=textfile=scorea.txt:reload=1:x=160:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
-            sportsFilters.push(`drawtext=text='-':x=198:y=52:fontcolor=white@0.4:fontsize=16${fontFileOpt}`);
-            sportsFilters.push(`drawtext=textfile=scoreb.txt:reload=1:x=224:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
-            sportsFilters.push(`drawtext=textfile=teamb.txt:reload=1:x=265:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
-          }
-          if (db.stream_status.timer_enabled) {
-            if (db.stream_status.scoreboard_enabled) {
-              sportsFilters.push("drawbox=x=366:y=40:w=80:h=42:color=0xEAB308:t=fill");
-              sportsFilters.push(`drawtext=textfile=timer.txt:reload=1:x=384:y=52:fontcolor=black:fontsize=16${fontFileOpt}`);
-            } else {
-              sportsFilters.push("drawbox=x=40:y=40:w=90:h=42:color=0xEAB308:t=fill");
-              sportsFilters.push(`drawtext=textfile=timer.txt:reload=1:x=63:y=52:fontcolor=black:fontsize=17${fontFileOpt}`);
-            }
-          }
-          sportsPart = "," + sportsFilters.join(",");
-        }
-
-        const filterComplex = `[0:v]fps=30,format=yuv420p${sportsPart}[v_base];[${logoInputIndex}:v]scale=140:-1[scaled_logo];[v_base][scaled_logo]overlay=${overlayPos}[v_out]`;
-        filterArgs = ["-filter_complex", filterComplex];
-
-        mappingArgs = mappingArgs.map(m => m === "0:v:0" ? "[v_out]" : m);
-      } else {
-        let vfFilters = "fps=30,format=yuv420p";
-        if ((type === "camera" || type === "video") && (db.stream_status.scoreboard_enabled || db.stream_status.timer_enabled)) {
-          writeSportsFiles(db.stream_status);
-          const escFontPath = fontPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-          const fontFileOpt = fs.existsSync(fontPath) && fs.statSync(fontPath).size > 1000 ? `:fontfile='${escFontPath}'` : "";
-          let sportsFilters = [];
-          if (db.stream_status.scoreboard_enabled) {
-            sportsFilters.push("drawbox=x=40:y=40:w=320:h=42:color=black@0.85:t=fill");
-            sportsFilters.push("drawbox=x=40:y=40:w=4:h=42:color=0xEAB308:t=fill");
-            sportsFilters.push(`drawtext=textfile=teama.txt:reload=1:x=75:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
-            sportsFilters.push(`drawtext=textfile=scorea.txt:reload=1:x=160:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
-            sportsFilters.push(`drawtext=text='-':x=198:y=52:fontcolor=white@0.4:fontsize=16${fontFileOpt}`);
-            sportsFilters.push(`drawtext=textfile=scoreb.txt:reload=1:x=224:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
-            sportsFilters.push(`drawtext=textfile=teamb.txt:reload=1:x=265:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
-          }
-          if (db.stream_status.timer_enabled) {
-            if (db.stream_status.scoreboard_enabled) {
-              sportsFilters.push("drawbox=x=366:y=40:w=80:h=42:color=0xEAB308:t=fill");
-              sportsFilters.push(`drawtext=textfile=timer.txt:reload=1:x=384:y=52:fontcolor=black:fontsize=16${fontFileOpt}`);
-            } else {
-              sportsFilters.push("drawbox=x=40:y=40:w=90:h=42:color=0xEAB308:t=fill");
-              sportsFilters.push(`drawtext=textfile=timer.txt:reload=1:x=63:y=52:fontcolor=black:fontsize=17${fontFileOpt}`);
-            }
-          }
-          vfFilters += "," + sportsFilters.join(",");
-        }
-        filterArgs = ["-vf", vfFilters];
+        filterComplexParts.push(`[${logoInputIndex}:v]scale=140:-1[scaled_logo]`);
+        filterComplexParts.push(`[v_base][scaled_logo]overlay=${overlayPos}[v_out]`);
+        videoOutLabel = "[v_out]";
       }
+
+      // Audio filtering
+      let audioOutLabel = "[a_out]";
+      const narrationVolume = Math.max(0, (db.stream_status.mic_narration_volume ?? 100) / 100);
+
+      if (type === "web") {
+        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+      } else if (narrationInputIndex !== -1) {
+        if (db.stream_status.mic_narration_mode === "mix" && hasAudio) {
+          addLog(`[SERVER] ÁUDIO MISTO: Misturando voz do narrador (Ganho: ${Math.round(narrationVolume * 100)}%) com o som original da câmera.\n`);
+          filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[cam_a]`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
+          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=longest:dropout_transition=2,aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        } else {
+          addLog(`[SERVER] ÁUDIO NARRAÇÃO: Transmitindo apenas voz do narrador (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)},aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        }
+      } else if (hasAudio) {
+        addLog("[SERVER] ÁUDIO NATIVO: Transmitindo som ambiente da câmera IP para o YouTube.\n");
+        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+      } else {
+        addLog("[SERVER] ÁUDIO SILENCIOSO: Câmera sem microfone embutido. Enviando faixa silenciosa para o YouTube.\n");
+        filterComplexParts.push(`[${silenceInputIndex}:a]aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+      }
+
+      const mappingArgs = ["-map", videoOutLabel, "-map", audioOutLabel];
+      const filterArgs = ["-filter_complex", filterComplexParts.join(";")];
 
       const rtmpUrl = `rtmp://a.rtmp.youtube.com/live2/${youtubeKey}`;
       const args = [
@@ -1029,19 +1005,20 @@ async function startServer() {
       "X-Accel-Buffering": "no"
     });
 
-    const scaleFilter = isPreview ? "scale=480:-1" : "scale=960:-1";
-    const fpsRate = isPreview ? "15" : "25";
-    const qualityVal = isPreview ? "8" : "6";
+    const scaleFilter = isPreview ? "scale=640:-1" : "scale=960:-1";
+    const fpsRate = "30";
+    const qualityVal = isPreview ? "6" : "4";
 
     const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
-    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp"];
+    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-flags", "+low_delay"];
 
     const args = [
-      "-thread_queue_size", "2048",
-      "-fflags", "+genpts+igndts",
+      "-thread_queue_size", "4096",
+      "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
+      "-fpsprobesize", "0",
       ...transportOpts,
-      "-probesize", "1000000",
-      "-analyzeduration", "1000000",
+      "-probesize", "500000",
+      "-analyzeduration", "500000",
       "-i", cam.rtsp_url,
       "-r", fpsRate,
       "-vf", scaleFilter,

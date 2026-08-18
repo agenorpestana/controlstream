@@ -49,37 +49,16 @@ interface StreamStatus {
   mic_narration_volume?: number;
 }
 
-const CameraPreview = ({ camId, className = '', quality = 'high' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
+const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
-  const [displayedSrc, setDisplayedSrc] = useState<string>(
-    quality === 'preview' 
-      ? `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`
-      : `/api/cameras/${camId}/mjpeg?token=${token}&quality=high`
-  );
   const [error, setError] = useState(false);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
+  const streamSrc = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}`;
+
   useEffect(() => {
-    let timer: any = null;
-    let isMounted = true;
-
-    if (quality === 'preview') {
-      // Snapshot polling: avoids open HTTP socket locks, preventing F5 refresh hangs
-      const updateSnapshot = () => {
-        if (!isMounted) return;
-        setDisplayedSrc(`/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
-      };
-      
-      updateSnapshot();
-      timer = setInterval(updateSnapshot, 2000);
-    } else {
-      // Live program preview: uses MJPEG
-      setDisplayedSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=high`);
-    }
-
+    setError(false);
     return () => {
-      isMounted = false;
-      if (timer) clearInterval(timer);
       if (imgRef.current) {
         imgRef.current.src = '';
         imgRef.current.removeAttribute('src');
@@ -95,11 +74,9 @@ const CameraPreview = ({ camId, className = '', quality = 'high' }: { camId: num
           <button 
             onClick={() => {
               setError(false);
-              setDisplayedSrc(
-                quality === 'preview' 
-                  ? `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`
-                  : `/api/cameras/${camId}/mjpeg?token=${token}&quality=high&r=${Date.now()}`
-              );
+              if (imgRef.current) {
+                imgRef.current.src = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`;
+              }
             }}
             className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors"
           >
@@ -110,17 +87,15 @@ const CameraPreview = ({ camId, className = '', quality = 'high' }: { camId: num
       <img 
         ref={imgRef}
         key={`cam-view-${camId}-${quality}`}
-        src={displayedSrc} 
+        src={streamSrc} 
         alt={`Camera ${camId}`}
         className="w-full h-full object-contain"
         onError={() => {
-          if (quality === 'high') {
-            setTimeout(() => {
-              if (imgRef.current) {
-                imgRef.current.src = `/api/cameras/${camId}/mjpeg?token=${token}&quality=high&retry=${Date.now()}`;
-              }
-            }, 2500);
-          }
+          setTimeout(() => {
+            if (imgRef.current) {
+              imgRef.current.src = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&retry=${Date.now()}`;
+            }
+          }, 2500);
         }}
       />
     </div>
