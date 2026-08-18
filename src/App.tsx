@@ -1013,21 +1013,30 @@ export default function App() {
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    const cleanUser = username.trim();
+    if (!cleanUser) {
+      alert('Por favor, informe seu usuário ou e-mail.');
+      return;
+    }
+    if (!password) {
+      alert('Por favor, informe sua senha.');
+      return;
+    }
     try {
       const res = await fetch('/api/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password })
+        body: JSON.stringify({ username: cleanUser, password })
       });
-      const data = await res.json();
-      if (data.token) {
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.token) {
         localStorage.setItem('token', data.token);
         setIsLoggedIn(true);
       } else {
-        alert('Falha no login');
+        alert(data.error || 'Falha no login. Verifique seu usuário e senha.');
       }
     } catch (e) {
-      alert('Erro ao conectar com o servidor');
+      alert('Erro de conexão ao tentar fazer login. Verifique se o servidor está ativo.');
     }
   };
 

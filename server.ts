@@ -24,7 +24,8 @@ import {
   dbDeleteVideo,
   dbAddLogo,
   dbDeleteLogo,
-  isDatabaseMySql
+  isDatabaseMySql,
+  findUserByCredentials
 } from "./db";
 
 // Start RTMP server for receiving push cameras
@@ -722,13 +723,21 @@ async function startServer() {
   });
 
   // API Routes
-  app.post("/api/login", (req, res) => {
+  app.post("/api/login", async (req, res) => {
     const { username, password } = req.body;
-    const db = getDb();
-    const user = db.users.find((u: any) => u.username === username);
-    if (!user || !bcrypt.compareSync(password, user.password)) {
-      return res.status(401).json({ error: "Credenciais inválidas" });
+    console.log(`[AUTH] Tentativa de login para: "${username}"`);
+    
+    if (!username || !password) {
+      return res.status(400).json({ error: "Informe o usuário e a senha." });
     }
+
+    const user = await findUserByCredentials(username, password);
+    if (!user) {
+      console.warn(`[AUTH] Falha no login para: "${username}"`);
+      return res.status(401).json({ error: "Credenciais inválidas. Verifique o usuário e a senha." });
+    }
+
+    console.log(`[AUTH] Login efetuado com sucesso para: "${user.username}" (ID: ${user.id})`);
     const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET);
     res.json({ token, user: { id: user.id, username: user.username, role: user.role } });
   });
