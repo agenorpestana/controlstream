@@ -11,6 +11,20 @@ import cors from "cors";
 import multer from "multer";
 import https from "https";
 import NodeMediaServer from "node-media-server";
+import {
+  initDatabase,
+  getDb,
+  saveDb,
+  writeSportsFiles,
+  dbAddCamera,
+  dbUpdateCamera,
+  dbDeleteCamera,
+  dbAddVideo,
+  dbDeleteVideo,
+  dbAddLogo,
+  dbDeleteLogo,
+  isDatabaseMySql
+} from "./db";
 
 // Start RTMP server for receiving push cameras
 if (process.env.DISABLE_RTMP_SERVER !== "true") {
@@ -80,113 +94,6 @@ if (!fs.existsSync(fontPath)) {
   } catch (e) {}
 }
 
-const writeSportsFiles = (status: any) => {
-  try {
-    fs.writeFileSync("./teama.txt", (status.team_a_name || "TIME A").toUpperCase());
-    fs.writeFileSync("./teamb.txt", (status.team_b_name || "TIME B").toUpperCase());
-    fs.writeFileSync("./scorea.txt", String(status.score_a ?? 0));
-    fs.writeFileSync("./scoreb.txt", String(status.score_b ?? 0));
-    const mins = Math.floor((status.timer_seconds || 0) / 60);
-    const secs = (status.timer_seconds || 0) % 60;
-    const timeStr = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-    fs.writeFileSync("./timer.txt", timeStr);
-  } catch (err) {
-    console.error("Erro ao gravar arquivos do painel esportivo:", err);
-  }
-};
-
-// Mock Database for Preview (In production, use MySQL)
-const DB_FILE = path.join(process.cwd(), "data.json");
-let dbCache: any = null;
-
-const initDb = () => {
-  if (!fs.existsSync(DB_FILE)) {
-    fs.writeFileSync(DB_FILE, JSON.stringify({
-      users: [
-        { id: 1, username: "admin", password: bcrypt.hashSync("admin123", 10), role: "admin" },
-        { id: 2, username: "suporte@unityautomacoes.com.br", password: bcrypt.hashSync("200616", 10), role: "admin" }
-      ],
-      cameras: [
-        { id: 1, name: "Câmera 01", rtsp_url: "rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4", is_active: true },
-        { id: 2, name: "Câmera 02", rtsp_url: "rtsp://demo:demo@static.cartesian.io:554/live/ch0", is_active: true }
-      ],
-      videos: [],
-      logos: [],
-      stream_status: { 
-        current_source_type: "none", 
-        current_source_id: null, 
-        is_streaming: false, 
-        youtube_key: "", 
-        system_domain: "",
-        loop_video: false,
-        scoreboard_enabled: false,
-        timer_enabled: false,
-        team_a_name: "TIME A",
-        team_b_name: "TIME B",
-        score_a: 0,
-        score_b: 0,
-        timer_seconds: 0,
-        timer_running: false,
-        logo_enabled: false,
-        active_logo_id: null,
-        logo_position: "top_right",
-        block_offline_switch: true,
-        mic_narration_enabled: false,
-        mic_narration_mode: "replace",
-        mic_narration_volume: 100
-      }
-    }, null, 2));
-  }
-  dbCache = JSON.parse(fs.readFileSync(DB_FILE, "utf-8"));
-  
-  // Ensure default stream status fields exist for sports overlay, domain, logo and narration
-  let updated = false;
-  if (!dbCache.stream_status) {
-    dbCache.stream_status = {};
-  }
-  if (!dbCache.logos) {
-    dbCache.logos = [];
-    updated = true;
-  }
-  if (dbCache.stream_status.system_domain === undefined || dbCache.stream_status.system_domain === "centralitl.unityautomacoes.com.br") {
-    dbCache.stream_status.system_domain = "";
-    updated = true;
-  }
-  if (dbCache.stream_status.scoreboard_enabled === undefined) {
-    dbCache.stream_status.scoreboard_enabled = false;
-    dbCache.stream_status.timer_enabled = false;
-    dbCache.stream_status.team_a_name = "TIME A";
-    dbCache.stream_status.team_b_name = "TIME B";
-    dbCache.stream_status.score_a = 0;
-    dbCache.stream_status.score_b = 0;
-    dbCache.stream_status.timer_seconds = 0;
-    dbCache.stream_status.timer_running = false;
-    updated = true;
-  }
-  if (dbCache.stream_status.logo_enabled === undefined) {
-    dbCache.stream_status.logo_enabled = false;
-    dbCache.stream_status.active_logo_id = null;
-    dbCache.stream_status.logo_position = "top_right";
-    updated = true;
-  }
-  if (dbCache.stream_status.block_offline_switch === undefined) {
-    dbCache.stream_status.block_offline_switch = true;
-    updated = true;
-  }
-  if (dbCache.stream_status.mic_narration_enabled === undefined) {
-    dbCache.stream_status.mic_narration_enabled = false;
-    dbCache.stream_status.mic_narration_mode = "replace";
-    dbCache.stream_status.mic_narration_volume = 100;
-    updated = true;
-  }
-  if (updated) {
-    fs.writeFileSync(DB_FILE, JSON.stringify(dbCache, null, 2));
-  }
-  
-  writeSportsFiles(dbCache.stream_status);
-};
-initDb();
-
 // Narration Audio Streamer (PCM 16-bit 44.1kHz Stereo)
 class NarrationAudioStreamer {
   private clients: ((chunk: Buffer) => void)[] = [];
@@ -229,19 +136,6 @@ class NarrationAudioStreamer {
 
 const narrationStreamer = new NarrationAudioStreamer();
 
-const getDb = () => {
-  if (!dbCache) initDb();
-  return dbCache;
-};
-
-const saveDb = (data: any) => {
-  dbCache = data;
-  // Async write to not block
-  fs.writeFile(DB_FILE, JSON.stringify(data, null, 2), (err) => {
-    if (err) console.error("Erro ao salvar DB:", err);
-  });
-};
-
 // Ensure uploads directory exists
 const uploadsDir = path.join(process.cwd(), "uploads");
 if (!fs.existsSync(uploadsDir)) {
@@ -280,6 +174,9 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 async function startServer() {
+  // Initialize database (MySQL if credentials configured, or local fallback)
+  await initDatabase();
+
   const app = express();
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ extended: true, limit: "50mb" }));
@@ -1076,32 +973,33 @@ async function startServer() {
     });
   });
 
-  app.post("/api/cameras", authenticate, (req, res) => {
+  app.get("/api/database/status", authenticate, (req, res) => {
     const db = getDb();
+    res.json({
+      isMySql: isDatabaseMySql(),
+      camerasCount: db.cameras.length,
+      videosCount: db.videos.length,
+      logosCount: (db.logos || []).length
+    });
+  });
+
+  app.post("/api/cameras", authenticate, async (req, res) => {
     const newCam = { id: Date.now(), ...req.body };
-    db.cameras.push(newCam);
-    saveDb(db);
+    await dbAddCamera(newCam);
     res.json(newCam);
   });
 
-  app.put("/api/cameras/:id", authenticate, (req, res) => {
-    const db = getDb();
+  app.put("/api/cameras/:id", authenticate, async (req, res) => {
     const camId = parseInt(req.params.id);
-    const index = db.cameras.findIndex((c: any) => c.id === camId);
-    if (index === -1) return res.status(404).json({ error: "Câmera não encontrada" });
-
     const { name, rtsp_url } = req.body;
-    if (name) db.cameras[index].name = name;
-    if (rtsp_url) db.cameras[index].rtsp_url = rtsp_url;
-
-    saveDb(db);
-    res.json(db.cameras[index]);
+    const updated = await dbUpdateCamera(camId, { name, rtsp_url });
+    if (!updated) return res.status(404).json({ error: "Câmera não encontrada" });
+    res.json(updated);
   });
 
-  app.delete("/api/cameras/:id", authenticate, (req, res) => {
-    const db = getDb();
-    db.cameras = db.cameras.filter((c: any) => c.id !== parseInt(req.params.id));
-    saveDb(db);
+  app.delete("/api/cameras/:id", authenticate, async (req, res) => {
+    const camId = parseInt(req.params.id);
+    await dbDeleteCamera(camId);
     res.json({ success: true });
   });
 
@@ -1109,7 +1007,7 @@ async function startServer() {
     res.json(getDb().videos);
   });
 
-  app.post("/api/videos", authenticate, handleUpload("video"), (req, res) => {
+  app.post("/api/videos", authenticate, handleUpload("video"), async (req, res) => {
     console.log("Recebendo requisição de upload de vídeo...");
     if (!req.file) {
       console.log("Nenhum arquivo recebido na requisição.");
@@ -1117,27 +1015,25 @@ async function startServer() {
     }
     console.log("Arquivo recebido:", req.file.originalname, "Salvo em:", req.file.path);
     
-    const db = getDb();
     const newVideo = {
       id: Date.now(),
       title: req.file.originalname,
       file_path: `uploads/${req.file.filename}`,
       created_at: new Date()
     };
-    db.videos.push(newVideo);
-    saveDb(db);
+    await dbAddVideo(newVideo);
     console.log("Vídeo salvo no banco de dados:", newVideo.id);
     res.json(newVideo);
   });
 
-  app.delete("/api/videos/:id", authenticate, (req, res) => {
+  app.delete("/api/videos/:id", authenticate, async (req, res) => {
+    const videoId = parseInt(req.params.id);
     const db = getDb();
-    const video = db.videos.find((v: any) => v.id === parseInt(req.params.id));
+    const video = db.videos.find((v: any) => v.id === videoId);
     if (video) {
       const fullPath = path.join(process.cwd(), video.file_path);
       if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
-      db.videos = db.videos.filter((v: any) => v.id !== video.id);
-      saveDb(db);
+      await dbDeleteVideo(videoId);
     }
     res.json({ success: true });
   });
@@ -1147,7 +1043,7 @@ async function startServer() {
     res.json(getDb().logos || []);
   });
 
-  app.post("/api/logos/upload", authenticate, handleUpload("logo"), (req, res) => {
+  app.post("/api/logos/upload", authenticate, handleUpload("logo"), async (req, res) => {
     console.log("[SERVER] Recebendo requisição de upload de logo...");
     if (!req.file) {
       console.log("[SERVER] Nenhum arquivo recebido na requisição de logo.");
@@ -1155,19 +1051,18 @@ async function startServer() {
     }
     console.log("[SERVER] Logo recebida com sucesso:", req.file.originalname, "Salva em:", req.file.path);
 
-    const db = getDb();
-    if (!db.logos) db.logos = [];
     const newLogo = {
       id: Date.now(),
       name: req.file.originalname,
       file_path: `uploads/${req.file.filename}`,
       created_at: new Date()
     };
-    db.logos.push(newLogo);
+    await dbAddLogo(newLogo);
+    const db = getDb();
     if (!db.stream_status.active_logo_id) {
       db.stream_status.active_logo_id = newLogo.id;
+      saveDb(db);
     }
-    saveDb(db);
 
     // Se a transmissão estiver ativa e a logo habilitada, reinicia a transmissão para aplicar
     if (db.stream_status.is_streaming && db.stream_status.logo_enabled && (db.stream_status.current_source_type === "camera" || db.stream_status.current_source_type === "video")) {
@@ -1179,20 +1074,20 @@ async function startServer() {
     res.json({ success: true, logo: newLogo, logos: db.logos });
   });
 
-  app.delete("/api/logos/:id", authenticate, (req, res) => {
-    const db = getDb();
+  app.delete("/api/logos/:id", authenticate, async (req, res) => {
     const logoId = parseInt(req.params.id);
+    const db = getDb();
     const logo = (db.logos || []).find((l: any) => l.id === logoId);
     if (logo) {
       const fullPath = path.join(process.cwd(), logo.file_path);
       if (fs.existsSync(fullPath)) {
         try { fs.unlinkSync(fullPath); } catch (e) {}
       }
-      db.logos = db.logos.filter((l: any) => l.id !== logoId);
+      await dbDeleteLogo(logoId);
       if (db.stream_status.active_logo_id === logoId) {
         db.stream_status.active_logo_id = db.logos[0]?.id || null;
+        saveDb(db);
       }
-      saveDb(db);
       io.emit("stream_status", db.stream_status);
 
       if (db.stream_status.is_streaming && db.stream_status.logo_enabled && (db.stream_status.current_source_type === "camera" || db.stream_status.current_source_type === "video")) {
@@ -1223,7 +1118,7 @@ async function startServer() {
       if (position !== undefined && position !== wasPosition) needsRestart = true;
     }
 
-    if (needsRestart) {
+    if (needsRestart && (db.stream_status.current_source_type === "camera" || db.stream_status.current_source_type === "video" || db.stream_status.current_source_type === "web")) {
       console.log("[SERVER] Reiniciando transmissão para aplicar alteração da logomarca");
       startStream(db.stream_status.current_source_type, db.stream_status.current_source_id);
     }
@@ -1365,7 +1260,7 @@ async function startServer() {
       }
     }
     
-    if (needsRestart) {
+    if (needsRestart && (db.stream_status.current_source_type === "camera" || db.stream_status.current_source_type === "video" || db.stream_status.current_source_type === "web")) {
       console.log("[SERVER] Reiniciando transmissão devido a alteraçao dos filtros de overlay");
       startStream(db.stream_status.current_source_type, db.stream_status.current_source_id);
     }
