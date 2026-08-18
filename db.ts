@@ -434,10 +434,12 @@ export const saveDb = (data: AppDatabase) => {
   memoryDb = data;
   writeSportsFiles(data.stream_status);
 
-  // 1. Asynchronous write to local JSON backup
-  fs.writeFile(DB_FILE, JSON.stringify(data, null, 2), (err) => {
-    if (err) console.error("[DATABASE] Erro ao gravar data.json:", err);
-  });
+  // 1. Synchronous write to local JSON backup to guarantee no race conditions or lost records
+  try {
+    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error("[DATABASE] Erro ao gravar data.json:", err);
+  }
 
   // 2. Asynchronous write to MySQL if connected
   if (mysqlPool && isMySqlConnected) {
@@ -500,10 +502,16 @@ export const saveDb = (data: AppDatabase) => {
   }
 };
 
-// Database CRUD Helpers with immediate MySQL sync
+// Database CRUD Helpers with immediate sync
 export async function dbAddCamera(cam: Camera) {
   const db = getDb();
-  db.cameras.push(cam);
+  if (!db.cameras) db.cameras = [];
+  const existingIdx = db.cameras.findIndex(c => c.id === cam.id);
+  if (existingIdx >= 0) {
+    db.cameras[existingIdx] = cam;
+  } else {
+    db.cameras.push(cam);
+  }
   saveDb(db);
 
   if (mysqlPool && isMySqlConnected) {

@@ -168,9 +168,30 @@ export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(!!localStorage.getItem('token'));
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [cameras, setCameras] = useState<CameraData[]>([]);
-  const [videos, setVideos] = useState<VideoData[]>([]);
-  const [logos, setLogos] = useState<LogoData[]>([]);
+  const [cameras, setCameras] = useState<CameraData[]>(() => {
+    try {
+      const cached = localStorage.getItem('cached_cameras');
+      return cached ? JSON.parse(cached) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+  const [videos, setVideos] = useState<VideoData[]>(() => {
+    try {
+      const cached = localStorage.getItem('cached_videos');
+      return cached ? JSON.parse(cached) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+  const [logos, setLogos] = useState<LogoData[]>(() => {
+    try {
+      const cached = localStorage.getItem('cached_logos');
+      return cached ? JSON.parse(cached) : [];
+    } catch (e) {
+      return [];
+    }
+  });
   const [logoFile, setLogoFile] = useState<File | null>(null);
   const [isUploadingLogo, setIsUploadingLogo] = useState(false);
   const logoFileInputRef = useRef<HTMLInputElement>(null);
@@ -822,6 +843,10 @@ export default function App() {
 
   const fetchData = async () => {
     const token = localStorage.getItem('token');
+    if (!token) {
+      setIsLoggedIn(false);
+      return;
+    }
     const headers = { Authorization: `Bearer ${token}` };
 
     try {
@@ -832,9 +857,28 @@ export default function App() {
         fetch('/api/logos', { headers })
       ]);
       
-      if (camsRes.ok) setCameras(await camsRes.json());
-      if (vidsRes.ok) setVideos(await vidsRes.json());
-      if (logosRes.ok) setLogos(await logosRes.json());
+      if (camsRes.status === 401 || vidsRes.status === 401 || statusRes.status === 401 || logosRes.status === 401) {
+        console.warn("[CLIENTE] Sessão expirada ou não autorizada (401). Redirecionando para login.");
+        localStorage.removeItem('token');
+        setIsLoggedIn(false);
+        return;
+      }
+
+      if (camsRes.ok) {
+        const camsData = await camsRes.json();
+        setCameras(camsData);
+        localStorage.setItem('cached_cameras', JSON.stringify(camsData));
+      }
+      if (vidsRes.ok) {
+        const vidsData = await vidsRes.json();
+        setVideos(vidsData);
+        localStorage.setItem('cached_videos', JSON.stringify(vidsData));
+      }
+      if (logosRes.ok) {
+        const logosData = await logosRes.json();
+        setLogos(logosData);
+        localStorage.setItem('cached_logos', JSON.stringify(logosData));
+      }
       if (statusRes.ok) {
         const s = await statusRes.json();
         setStatus(s);
@@ -860,7 +904,7 @@ export default function App() {
         }
       }
     } catch (e) {
-      console.error(e);
+      console.error("Erro ao sincronizar dados com o servidor:", e);
     }
   };
 
@@ -1358,8 +1402,12 @@ export default function App() {
     }
 
     const tempId = Date.now();
-    const optimisticCam: CameraData = { id: tempId, name: newCam.name, rtsp_url: url };
-    setCameras(prev => [...prev, optimisticCam]);
+    const optimisticCam: CameraData = { id: tempId, name: newCam.name, rtsp_url: url, is_active: true };
+    setCameras(prev => {
+      const next = [...prev, optimisticCam];
+      localStorage.setItem('cached_cameras', JSON.stringify(next));
+      return next;
+    });
 
     setNewCam({ name: '', rtsp_url: '' });
     generateNewStreamKey();
@@ -1373,9 +1421,23 @@ export default function App() {
         },
         body: JSON.stringify({ name: optimisticCam.name, rtsp_url: url })
       });
+      if (res.status === 401) {
+        localStorage.removeItem('token');
+        setIsLoggedIn(false);
+        alert('Sessão expirada. Faça login novamente.');
+        return;
+      }
       if (res.ok) {
         const saved = await res.json();
-        setCameras(prev => prev.map(c => c.id === tempId ? saved : c));
+        setCameras(prev => {
+          const next = prev.map(c => c.id === tempId ? saved : c);
+          localStorage.setItem('cached_cameras', JSON.stringify(next));
+          return next;
+        });
+      } else {
+        const errData = await res.json().catch(() => null);
+        alert(errData?.error || 'Erro ao salvar câmera no servidor.');
+        fetchData();
       }
     } catch (e) {
       console.error("Erro ao adicionar câmera:", e);
@@ -1385,12 +1447,21 @@ export default function App() {
 
   const deleteCamera = async (id: number) => {
     const token = localStorage.getItem('token');
-    setCameras(prev => prev.filter(c => c.id !== id));
+    setCameras(prev => {
+      const next = prev.filter(c => c.id !== id);
+      localStorage.setItem('cached_cameras', JSON.stringify(next));
+      return next;
+    });
     try {
-      await fetch(`/api/cameras/${id}`, {
+      const res = await fetch(`/api/cameras/${id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });
+      if (res.status === 401) {
+        localStorage.removeItem('token');
+        setIsLoggedIn(false);
+        alert('Sessão expirada. Faça login novamente.');
+      }
     } catch (e) {
       console.error("Erro ao excluir câmera:", e);
       fetchData();
@@ -1435,7 +1506,11 @@ export default function App() {
 
     const targetId = editingCam.id;
     const updatedName = editCamName;
-    setCameras(prev => prev.map(c => c.id === targetId ? { ...c, name: updatedName, rtsp_url: finalUrl } : c));
+    setCameras(prev => {
+      const next = prev.map(c => c.id === targetId ? { ...c, name: updatedName, rtsp_url: finalUrl } : c);
+      localStorage.setItem('cached_cameras', JSON.stringify(next));
+      return next;
+    });
     setEditingCam(null);
 
     const token = localStorage.getItem('token');
@@ -1448,6 +1523,12 @@ export default function App() {
         },
         body: JSON.stringify({ name: updatedName, rtsp_url: finalUrl })
       });
+      if (res.status === 401) {
+        localStorage.removeItem('token');
+        setIsLoggedIn(false);
+        alert('Sessão expirada. Faça login novamente.');
+        return;
+      }
       if (!res.ok) {
         alert('Erro ao atualizar câmera.');
         fetchData();
