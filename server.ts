@@ -130,13 +130,16 @@ const initDb = () => {
         logo_enabled: false,
         active_logo_id: null,
         logo_position: "top_right",
-        block_offline_switch: true
+        block_offline_switch: true,
+        mic_narration_enabled: false,
+        mic_narration_mode: "replace",
+        mic_narration_volume: 100
       }
     }, null, 2));
   }
   dbCache = JSON.parse(fs.readFileSync(DB_FILE, "utf-8"));
   
-  // Ensure default stream status fields exist for sports overlay, domain, and logo
+  // Ensure default stream status fields exist for sports overlay, domain, logo and narration
   let updated = false;
   if (!dbCache.stream_status) {
     dbCache.stream_status = {};
@@ -170,6 +173,12 @@ const initDb = () => {
     dbCache.stream_status.block_offline_switch = true;
     updated = true;
   }
+  if (dbCache.stream_status.mic_narration_enabled === undefined) {
+    dbCache.stream_status.mic_narration_enabled = false;
+    dbCache.stream_status.mic_narration_mode = "replace";
+    dbCache.stream_status.mic_narration_volume = 100;
+    updated = true;
+  }
   if (updated) {
     fs.writeFileSync(DB_FILE, JSON.stringify(dbCache, null, 2));
   }
@@ -177,6 +186,48 @@ const initDb = () => {
   writeSportsFiles(dbCache.stream_status);
 };
 initDb();
+
+// Narration Audio Streamer (PCM 16-bit 44.1kHz Stereo)
+class NarrationAudioStreamer {
+  private clients: ((chunk: Buffer) => void)[] = [];
+  private lastChunkTime: number = 0;
+
+  constructor() {
+    // Generate constant 44.1kHz stereo silence ticks (every 40ms = ~3528 bytes) if no mic chunk arrived
+    // This guarantees FFmpeg's audio pipe never stutters, blocks, or falls out of sync
+    setInterval(() => {
+      if (Date.now() - this.lastChunkTime > 100 && this.clients.length > 0) {
+        const silenceChunk = Buffer.alloc(3528, 0);
+        this.broadcast(silenceChunk);
+      }
+    }, 40);
+  }
+
+  public pushChunk(buf: Buffer) {
+    this.lastChunkTime = Date.now();
+    this.broadcast(buf);
+  }
+
+  private broadcast(chunk: Buffer) {
+    for (let i = this.clients.length - 1; i >= 0; i--) {
+      try {
+        this.clients[i](chunk);
+      } catch (e) {
+        this.clients.splice(i, 1);
+      }
+    }
+  }
+
+  public subscribe(cb: (chunk: Buffer) => void) {
+    this.clients.push(cb);
+    return () => {
+      const idx = this.clients.indexOf(cb);
+      if (idx !== -1) this.clients.splice(idx, 1);
+    };
+  }
+}
+
+const narrationStreamer = new NarrationAudioStreamer();
 
 const getDb = () => {
   if (!dbCache) initDb();
@@ -295,6 +346,17 @@ async function startServer() {
 
     socket.on("web_ready_to_start", () => {
       // Handshake is now handled globally in startStream to ensure FFmpeg is alive
+    });
+
+    socket.on("narration_pcm_chunk", (data) => {
+      try {
+        const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+        if (buffer.length > 0) {
+          narrationStreamer.pushChunk(buffer);
+        }
+      } catch (e) {
+        console.error("Erro ao processar chunk de áudio da narração:", e);
+      }
     });
 
     socket.on("disconnect", () => {
@@ -461,7 +523,28 @@ async function startServer() {
           ];
         }
 
-        if (hasAudio) {
+        if (db.stream_status.mic_narration_enabled) {
+          const narrationUrl = `http://127.0.0.1:${PORT}/internal/narration-audio-pcm`;
+          inputArgs.push("-f", "s16le", "-ar", "44100", "-ac", "2", "-i", narrationUrl);
+          const narrationInputIndex = 1;
+
+          if (db.stream_status.mic_narration_mode === "mix" && hasAudio) {
+            addLog("Áudio MISTO: Narração do Computador + Áudio Ambiente da Câmera.\n");
+            // amix will mix camera audio (0:a) and narration (1:a)
+            mappingArgs = [
+              "-map", "0:v:0",
+              "-map", "1:a:0",
+              "-af", "aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo"
+            ];
+          } else {
+            addLog("Áudio da Narração do Computador selecionado para a transmissão.\n");
+            mappingArgs = [
+              "-map", "0:v:0",
+              "-map", `${narrationInputIndex}:a:0`,
+              "-af", "aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo"
+            ];
+          }
+        } else if (hasAudio) {
           addLog("Áudio detectado na câmera! Transmitindo áudio nativo resincronizado para AAC 44.1kHz Estéreo.\n");
           mappingArgs = [
             "-map", "0:v:0", 
@@ -482,7 +565,19 @@ async function startServer() {
           inputArgs = ["-stream_loop", "-1"];
         }
         inputArgs.push("-re", "-fflags", "+genpts", "-i", videoPath);
-        mappingArgs = ["-map", "0:v:0", "-map", "0:a:0?"];
+
+        if (db.stream_status.mic_narration_enabled) {
+          const narrationUrl = `http://127.0.0.1:${PORT}/internal/narration-audio-pcm`;
+          inputArgs.push("-f", "s16le", "-ar", "44100", "-ac", "2", "-i", narrationUrl);
+          addLog("Áudio de Narração do Computador ativo sobre o vídeo comercial.\n");
+          mappingArgs = [
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-af", "aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo"
+          ];
+        } else {
+          mappingArgs = ["-map", "0:v:0", "-map", "0:a:0?"];
+        }
       } else if (type === "web") {
         inputArgs = [
           "-use_wallclock_as_timestamps", "1",
@@ -1302,11 +1397,60 @@ async function startServer() {
     res.json({ success: true, status: db.stream_status });
   });
 
+  // Internal PCM audio stream endpoint for FFmpeg
+  app.get("/internal/narration-audio-pcm", (req, res) => {
+    res.writeHead(200, {
+      "Content-Type": "audio/l16; rate=44100; channels=2",
+      "Cache-Control": "no-cache, no-store, must-revalidate",
+      "Connection": "close"
+    });
+
+    const unsubscribe = narrationStreamer.subscribe((chunk) => {
+      if (!res.writableEnded) {
+        try {
+          res.write(chunk);
+        } catch (e) {}
+      }
+    });
+
+    req.on("close", () => {
+      unsubscribe();
+      if (!res.writableEnded) res.end();
+    });
+  });
+
+  app.post("/api/status/narration", authenticate, (req, res) => {
+    const { enabled, mode, volume } = req.body;
+    const db = getDb();
+    const wasEnabled = db.stream_status.mic_narration_enabled;
+    const wasMode = db.stream_status.mic_narration_mode;
+
+    if (enabled !== undefined) db.stream_status.mic_narration_enabled = Boolean(enabled);
+    if (mode !== undefined) db.stream_status.mic_narration_mode = mode; // "replace" | "mix"
+    if (volume !== undefined) db.stream_status.mic_narration_volume = Number(volume);
+
+    saveDb(db);
+    io.emit("stream_status", db.stream_status);
+
+    // Se estiver transmitindo e a opção de narração mudou, reinicia a transmissão para aplicar o canal de áudio
+    if (db.stream_status.is_streaming && (db.stream_status.current_source_type === "camera" || db.stream_status.current_source_type === "video")) {
+      if (enabled !== undefined && enabled !== wasEnabled) {
+        console.log("[SERVER] Reiniciando transmissão devido a alteração do áudio de narração");
+        startStream(db.stream_status.current_source_type, db.stream_status.current_source_id);
+      } else if (mode !== undefined && mode !== wasMode) {
+        console.log("[SERVER] Reiniciando transmissão devido a alteração do modo de mixagem de áudio");
+        startStream(db.stream_status.current_source_type, db.stream_status.current_source_id);
+      }
+    }
+
+    res.json({ success: true, status: db.stream_status });
+  });
+
   const checkCameraOnline = (rtspUrl: string, camId?: number): Promise<boolean> => {
     if (!rtspUrl) return Promise.resolve(false);
     
-    // Se o snapshot desta câmera estiver em cache e recente (< 5s), a câmera está online com certeza!
-    if (camId && snapshotCaches[camId] && snapshotCaches[camId].data.length > 0 && (Date.now() - snapshotCaches[camId].timestamp < 5000)) {
+    // Se o snapshot desta câmera estiver em cache e recente (< 6s), a câmera está online com certeza!
+    if (camId && snapshotCaches[camId] && snapshotCaches[camId].data.length > 0 && (Date.now() - snapshotCaches[camId].timestamp < 6000)) {
       return Promise.resolve(true);
     }
 
@@ -1315,8 +1459,8 @@ async function startServer() {
     const probeArgs = [
       ...transportOpts,
       "-v", "error",
-      "-analyzeduration", "500000",
-      "-probesize", "500000",
+      "-analyzeduration", "1000000",
+      "-probesize", "1000000",
       "-show_entries", "stream=codec_type",
       "-of", "default=noprint_wrappers=1",
       rtspUrl
@@ -1334,7 +1478,7 @@ async function startServer() {
       const timer = setTimeout(() => {
         try { proc.kill("SIGKILL"); } catch (e) {}
         resolve(out.toLowerCase().includes("video") || out.toLowerCase().includes("audio"));
-      }, 1000);
+      }, 3500);
 
       if (proc.stdout) {
         proc.stdout.on("data", (d: any) => { out += d.toString(); });

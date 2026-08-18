@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Camera, Video, Play, Square, Settings, Plus, Trash2, LogOut, Activity, Monitor, Upload, Repeat, RefreshCw, Mic, MicOff, Trophy, Pause, RotateCcw, Edit, AlertTriangle, X } from 'lucide-react';
+import { Camera, Video, Play, Square, Settings, Plus, Trash2, LogOut, Activity, Monitor, Upload, Repeat, RefreshCw, Mic, MicOff, Trophy, Pause, RotateCcw, Edit, AlertTriangle, X, Volume2, Radio } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { io } from 'socket.io-client';
 
@@ -44,30 +44,42 @@ interface StreamStatus {
   active_logo_id?: number | null;
   logo_position?: 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right';
   block_offline_switch?: boolean;
+  mic_narration_enabled?: boolean;
+  mic_narration_mode?: 'replace' | 'mix';
+  mic_narration_volume?: number;
 }
 
 const CameraPreview = ({ camId, className = '', quality = 'high' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
-  const [displayedSrc, setDisplayedSrc] = useState<string>(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}`);
+  const [displayedSrc, setDisplayedSrc] = useState<string>(
+    quality === 'preview' 
+      ? `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`
+      : `/api/cameras/${camId}/mjpeg?token=${token}&quality=high`
+  );
   const [error, setError] = useState(false);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
   useEffect(() => {
-    // Generate a stable URL for the camera MJPEG stream
-    const url = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}`;
-    setDisplayedSrc(url);
-    setError(false);
+    let timer: any = null;
+    let isMounted = true;
 
-    // Auto-refresh imperceptível a cada 2 minutos (120s) para manter a conexão HTTP de vídeo sempre ativa
-    const autoRefreshInterval = setInterval(() => {
-      if (imgRef.current) {
-        imgRef.current.src = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&ar=${Date.now()}`;
-      }
-    }, 120000);
+    if (quality === 'preview') {
+      // Snapshot polling: avoids open HTTP socket locks, preventing F5 refresh hangs
+      const updateSnapshot = () => {
+        if (!isMounted) return;
+        setDisplayedSrc(`/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
+      };
+      
+      updateSnapshot();
+      timer = setInterval(updateSnapshot, 2000);
+    } else {
+      // Live program preview: uses MJPEG
+      setDisplayedSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=high`);
+    }
 
     return () => {
-      clearInterval(autoRefreshInterval);
-      // ONLY clear src when switching camera ID/quality or unmounting
+      isMounted = false;
+      if (timer) clearInterval(timer);
       if (imgRef.current) {
         imgRef.current.src = '';
         imgRef.current.removeAttribute('src');
@@ -83,9 +95,11 @@ const CameraPreview = ({ camId, className = '', quality = 'high' }: { camId: num
           <button 
             onClick={() => {
               setError(false);
-              if (imgRef.current) {
-                imgRef.current.src = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&r=${Date.now()}`;
-              }
+              setDisplayedSrc(
+                quality === 'preview' 
+                  ? `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`
+                  : `/api/cameras/${camId}/mjpeg?token=${token}&quality=high&r=${Date.now()}`
+              );
             }}
             className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors"
           >
@@ -95,17 +109,18 @@ const CameraPreview = ({ camId, className = '', quality = 'high' }: { camId: num
       )}
       <img 
         ref={imgRef}
-        key={`mjpeg-cam-${camId}-${quality}`}
+        key={`cam-view-${camId}-${quality}`}
         src={displayedSrc} 
         alt={`Camera ${camId}`}
         className="w-full h-full object-contain"
         onError={() => {
-          // Retry automatically after a short delay without breaking layout or resetting src continuously
-          setTimeout(() => {
-            if (imgRef.current) {
-              imgRef.current.src = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&retry=${Date.now()}`;
-            }
-          }, 2000);
+          if (quality === 'high') {
+            setTimeout(() => {
+              if (imgRef.current) {
+                imgRef.current.src = `/api/cameras/${camId}/mjpeg?token=${token}&quality=high&retry=${Date.now()}`;
+              }
+            }, 2500);
+          }
         }}
       />
     </div>
@@ -373,6 +388,200 @@ export default function App() {
       if (interval) clearInterval(interval);
     };
   }, [isTimerRunning]);
+
+  // Narration / Computer Audio Input State & Web Audio Streamer
+  const narrationAudioCtxRef = useRef<AudioContext | null>(null);
+  const narrationMediaStreamRef = useRef<MediaStream | null>(null);
+  const [micAudioLevel, setMicAudioLevel] = useState(0);
+  const [audioInputDevices, setAudioInputDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedAudioDeviceId, setSelectedAudioDeviceId] = useState<string>('');
+
+  // Enumerate microphone / audio devices
+  const refreshAudioDevices = async () => {
+    try {
+      if (!navigator.mediaDevices?.enumerateDevices) return;
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter(d => d.kind === 'audioinput');
+      setAudioInputDevices(audioInputs);
+      if (audioInputs.length > 0 && !selectedAudioDeviceId) {
+        setSelectedAudioDeviceId(audioInputs[0].deviceId);
+      }
+    } catch (e) {
+      console.warn("Erro ao listar dispositivos de áudio:", e);
+    }
+  };
+
+  useEffect(() => {
+    refreshAudioDevices();
+    navigator.mediaDevices?.addEventListener?.('devicechange', refreshAudioDevices);
+    return () => {
+      navigator.mediaDevices?.removeEventListener?.('devicechange', refreshAudioDevices);
+    };
+  }, []);
+
+  // Global cleanup on page refresh (F5) or close to prevent hanging connections
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (socketRef.current) {
+        try { socketRef.current.disconnect(); } catch (e) {}
+      }
+      if (narrationMediaStreamRef.current) {
+        narrationMediaStreamRef.current.getTracks().forEach(t => t.stop());
+      }
+      if (screenStream) screenStream.getTracks().forEach(t => t.stop());
+      if (cameraStream) cameraStream.getTracks().forEach(t => t.stop());
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [screenStream, cameraStream]);
+
+  // Live Narration Web Audio Streamer -> Socket.io PCM 16-bit 44.1kHz Stereo
+  useEffect(() => {
+    const isEnabled = status?.mic_narration_enabled;
+    if (!isEnabled) {
+      if (narrationMediaStreamRef.current) {
+        narrationMediaStreamRef.current.getTracks().forEach(t => t.stop());
+        narrationMediaStreamRef.current = null;
+      }
+      if (narrationAudioCtxRef.current) {
+        try { narrationAudioCtxRef.current.close(); } catch (e) {}
+        narrationAudioCtxRef.current = null;
+      }
+      setMicAudioLevel(0);
+      return;
+    }
+
+    let isCancelled = false;
+
+    const startNarrationCapture = async () => {
+      try {
+        const audioConstraints: MediaTrackConstraints = {
+          channelCount: 2,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          sampleRate: 44100
+        };
+        if (selectedAudioDeviceId) {
+          audioConstraints.deviceId = { exact: selectedAudioDeviceId };
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+        if (isCancelled) {
+          stream.getTracks().forEach(t => t.stop());
+          return;
+        }
+
+        narrationMediaStreamRef.current = stream;
+        refreshAudioDevices();
+
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        const audioCtx = new AudioContextClass({ sampleRate: 44100 });
+        narrationAudioCtxRef.current = audioCtx;
+
+        const source = audioCtx.createMediaStreamSource(stream);
+        const gainNode = audioCtx.createGain();
+        const volumeFactor = ((status?.mic_narration_volume ?? 100) / 100);
+        gainNode.gain.value = volumeFactor;
+
+        // ScriptProcessor with 2048 samples (~46ms buffer at 44.1kHz)
+        const processor = audioCtx.createScriptProcessor(2048, 2, 2);
+
+        source.connect(gainNode);
+        gainNode.connect(processor);
+        processor.connect(audioCtx.destination);
+
+        let lastVuUpdate = 0;
+
+        processor.onaudioprocess = (e) => {
+          if (isCancelled) return;
+          const left = e.inputBuffer.getChannelData(0);
+          const right = e.inputBuffer.numberOfChannels > 1 ? e.inputBuffer.getChannelData(1) : left;
+
+          // Convert Float32Array to 16-bit PCM Interleaved Stereo
+          const pcmData = new Int16Array(left.length * 2);
+          let sumSquares = 0;
+
+          for (let i = 0; i < left.length; i++) {
+            let sL = Math.max(-1, Math.min(1, left[i]));
+            pcmData[i * 2] = sL < 0 ? sL * 0x8000 : sL * 0x7FFF;
+
+            let sR = Math.max(-1, Math.min(1, right[i]));
+            pcmData[i * 2 + 1] = sR < 0 ? sR * 0x8000 : sR * 0x7FFF;
+
+            sumSquares += (sL * sL + sR * sR) / 2;
+          }
+
+          // Emit binary PCM buffer over Socket.io
+          if (socketRef.current && socketRef.current.connected) {
+            socketRef.current.emit("narration_pcm_chunk", pcmData.buffer);
+          }
+
+          // Update VU level indicator
+          const now = performance.now();
+          if (now - lastVuUpdate > 70) {
+            lastVuUpdate = now;
+            const rms = Math.sqrt(sumSquares / left.length);
+            const level = Math.min(100, Math.round(rms * 250));
+            setMicAudioLevel(level);
+          }
+        };
+      } catch (err: any) {
+        console.error("Erro ao iniciar captura do áudio do computador:", err);
+        setFfmpegLogs(prev => [...prev.slice(-49), `[SISTEMA] Erro no áudio da narração: ${err.message}\n`]);
+      }
+    };
+
+    startNarrationCapture();
+
+    return () => {
+      isCancelled = true;
+      if (narrationMediaStreamRef.current) {
+        narrationMediaStreamRef.current.getTracks().forEach(t => t.stop());
+        narrationMediaStreamRef.current = null;
+      }
+      if (narrationAudioCtxRef.current) {
+        try { narrationAudioCtxRef.current.close(); } catch (e) {}
+        narrationAudioCtxRef.current = null;
+      }
+      setMicAudioLevel(0);
+    };
+  }, [status?.mic_narration_enabled, selectedAudioDeviceId]);
+
+  const handleToggleNarration = async (enabled: boolean, mode?: 'replace' | 'mix', volume?: number) => {
+    const token = localStorage.getItem('token');
+    const targetMode = mode || status?.mic_narration_mode || 'replace';
+    const targetVol = volume !== undefined ? volume : (status?.mic_narration_volume ?? 100);
+
+    if (status) {
+      setStatus({ ...status, mic_narration_enabled: enabled, mic_narration_mode: targetMode, mic_narration_volume: targetVol });
+    }
+
+    try {
+      const res = await fetch('/api/status/narration', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          enabled,
+          mode: targetMode,
+          volume: targetVol
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.status) {
+        setStatus(data.status);
+      }
+    } catch (e) {
+      console.error("Erro ao alterar status da narração:", e);
+    }
+  };
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const standaloneMicStreamRef = useRef<MediaStream | null>(null);
@@ -783,7 +992,7 @@ export default function App() {
 
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 6000);
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
 
       const response = await fetch('/api/stream/switch', {
         method: 'POST',
@@ -2139,6 +2348,129 @@ export default function App() {
                     )}
                   </div>
                 </div>
+
+                {/* Painel de Áudio do Computador / Narração Esportiva */}
+                <div className="bg-[#151619] rounded-3xl border border-white/10 p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <div className={`p-2.5 rounded-xl ${status?.mic_narration_enabled ? 'bg-emerald-500/10 text-emerald-400' : 'bg-white/5 text-white/40'}`}>
+                        {status?.mic_narration_enabled ? <Radio className="animate-pulse" size={20} /> : <Mic size={20} />}
+                      </div>
+                      <div>
+                        <h3 className="text-base font-bold text-white">Áudio do Computador</h3>
+                        <p className="text-xs text-white/40">Narração e som do PC para o YouTube</p>
+                      </div>
+                    </div>
+                    
+                    <button
+                      type="button"
+                      onClick={() => handleToggleNarration(!status?.mic_narration_enabled)}
+                      className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer shadow-sm ${
+                        status?.mic_narration_enabled 
+                          ? 'bg-emerald-500 hover:bg-emerald-600 text-white shadow-emerald-500/20' 
+                          : 'bg-white/10 hover:bg-white/15 text-white/70'
+                      }`}
+                    >
+                      {status?.mic_narration_enabled ? <Mic size={14} /> : <MicOff size={14} />}
+                      <span>{status?.mic_narration_enabled ? 'NARRANDO AO VIVO' : 'ATIVAR NARRAÇÃO'}</span>
+                    </button>
+                  </div>
+
+                  {status?.mic_narration_enabled && (
+                    <div className="space-y-4 pt-4 border-t border-white/5 animate-fade-in">
+                      {/* Medidor VU de Áudio em Tempo Real */}
+                      <div className="bg-black/30 rounded-2xl p-3 border border-white/5">
+                        <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-white/40 mb-2">
+                          <span className="flex items-center gap-1.5">
+                            <span className={`w-2 h-2 rounded-full ${micAudioLevel > 3 ? 'bg-emerald-400 animate-ping' : 'bg-white/20'}`} />
+                            Sinal do Microfone
+                          </span>
+                          <span className="font-bold text-emerald-400">{micAudioLevel}%</span>
+                        </div>
+                        <div className="w-full bg-white/5 h-2.5 rounded-full overflow-hidden p-0.5 border border-white/10">
+                          <div 
+                            className={`h-full rounded-full transition-all duration-75 ${
+                              micAudioLevel > 80 
+                                ? 'bg-gradient-to-r from-emerald-500 via-amber-400 to-red-500' 
+                                : 'bg-emerald-400'
+                            }`}
+                            style={{ width: `${Math.min(100, Math.max(0, micAudioLevel))}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Modo de Áudio: Substituir ou Misturar */}
+                      <div className="space-y-2">
+                        <label className="block text-[10px] font-mono text-white/40 uppercase">Modo de Saída de Áudio</label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleNarration(true, 'replace')}
+                            className={`p-2.5 rounded-xl border text-left transition-all ${
+                              (status?.mic_narration_mode || 'replace') === 'replace'
+                                ? 'bg-emerald-500/10 border-emerald-500 text-white'
+                                : 'bg-black/20 border-white/5 text-white/50 hover:border-white/10'
+                            }`}
+                          >
+                            <span className="block text-xs font-bold">Apenas Narração</span>
+                            <span className="block text-[9px] text-white/40 mt-0.5">Substitui o som da câmera</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleToggleNarration(true, 'mix')}
+                            className={`p-2.5 rounded-xl border text-left transition-all ${
+                              status?.mic_narration_mode === 'mix'
+                                ? 'bg-emerald-500/10 border-emerald-500 text-white'
+                                : 'bg-black/20 border-white/5 text-white/50 hover:border-white/10'
+                            }`}
+                          >
+                            <span className="block text-xs font-bold">Misturar Áudios</span>
+                            <span className="block text-[9px] text-white/40 mt-0.5">Voz + Som da câmera IP</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Seleção do Dispositivo de Microfone */}
+                      {audioInputDevices.length > 0 && (
+                        <div className="space-y-1">
+                          <label className="block text-[10px] font-mono text-white/40 uppercase">Dispositivo de Entrada</label>
+                          <select
+                            value={selectedAudioDeviceId}
+                            onChange={(e) => setSelectedAudioDeviceId(e.target.value)}
+                            className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500 font-mono"
+                          >
+                            {audioInputDevices.map((d, i) => (
+                              <option key={d.deviceId || i} value={d.deviceId}>
+                                {d.label || `Microfone / Entrada de Linha ${i + 1}`}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+
+                      {/* Controle de Volume */}
+                      <div className="bg-black/20 rounded-2xl p-3 border border-white/5">
+                        <div className="flex items-center justify-between text-[10px] font-mono uppercase text-white/40 mb-2">
+                          <span className="flex items-center gap-1.5">
+                            <Volume2 size={12} />
+                            Ganho da Narração
+                          </span>
+                          <span className="font-bold text-white">{status?.mic_narration_volume ?? 100}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="150"
+                          step="5"
+                          value={status?.mic_narration_volume ?? 100}
+                          onChange={(e) => handleToggleNarration(true, undefined, parseInt(e.target.value))}
+                          className="w-full accent-emerald-500 h-1.5 bg-black/40 rounded-lg cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             </motion.div>
           )}
@@ -2941,6 +3273,79 @@ export default function App() {
                       <div className={`w-2.5 h-2.5 rounded-full ${status?.block_offline_switch !== false ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'}`} />
                       <span>{status?.block_offline_switch !== false ? 'BLOQUEAR OFFLINE' : 'PERMITIR OFFLINE'}</span>
                     </button>
+                  </div>
+                </div>
+
+                <div className="pt-6 border-t border-white/10">
+                  <h3 className="text-xl font-bold mb-2">Áudio do Computador / Narração Esportiva</h3>
+                  <p className="text-xs text-white/40 mb-4 leading-relaxed">
+                    Capture a narração ou som de uma mesa de áudio/microfone conectada ao computador e transmita para o YouTube junto com o vídeo das câmeras.
+                  </p>
+
+                  <div className="p-5 bg-black/40 rounded-2xl border border-white/10 space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div className="flex items-center gap-3">
+                        <div className={`p-3 rounded-xl shrink-0 ${status?.mic_narration_enabled ? 'bg-emerald-500/10 text-emerald-400' : 'bg-white/5 text-white/40'}`}>
+                          {status?.mic_narration_enabled ? <Radio className="animate-pulse" size={22} /> : <MicOff size={22} />}
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-bold text-white">
+                            {status?.mic_narration_enabled ? 'Narração do Computador Ativa' : 'Narração do Computador Desativada'}
+                          </h4>
+                          <p className="text-xs text-white/40 mt-0.5">
+                            {status?.mic_narration_enabled 
+                              ? 'O áudio capturado deste computador está sendo enviado ao vivo.' 
+                              : 'O som enviado ao YouTube é apenas o áudio original da câmera IP/vídeo.'}
+                          </p>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleToggleNarration(!status?.mic_narration_enabled)}
+                        className={`px-5 py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer shrink-0 ${
+                          status?.mic_narration_enabled
+                            ? 'bg-emerald-500 hover:bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
+                            : 'bg-white/10 hover:bg-white/15 text-white/70'
+                        }`}
+                      >
+                        {status?.mic_narration_enabled ? <Mic size={16} /> : <MicOff size={16} />}
+                        <span>{status?.mic_narration_enabled ? 'DESATIVAR' : 'ATIVAR NARRAÇÃO'}</span>
+                      </button>
+                    </div>
+
+                    {status?.mic_narration_enabled && (
+                      <div className="pt-4 border-t border-white/5 space-y-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="space-y-1">
+                            <label className="block text-[10px] font-mono text-white/40 uppercase">Modo de Combinação</label>
+                            <select
+                              value={status?.mic_narration_mode || 'replace'}
+                              onChange={(e) => handleToggleNarration(true, e.target.value as any)}
+                              className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-emerald-500"
+                            >
+                              <option value="replace">Apenas Narração (Substitui som da câmera)</option>
+                              <option value="mix">Misturar (Voz + Áudio ambiente da câmera)</option>
+                            </select>
+                          </div>
+
+                          <div className="space-y-1">
+                            <label className="block text-[10px] font-mono text-white/40 uppercase">Dispositivo de Captura</label>
+                            <select
+                              value={selectedAudioDeviceId}
+                              onChange={(e) => setSelectedAudioDeviceId(e.target.value)}
+                              className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-emerald-500 font-mono"
+                            >
+                              {audioInputDevices.map((d, i) => (
+                                <option key={d.deviceId || i} value={d.deviceId}>
+                                  {d.label || `Entrada de Áudio ${i + 1}`}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
