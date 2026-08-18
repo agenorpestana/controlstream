@@ -52,13 +52,37 @@ interface StreamStatus {
 const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
   const [error, setError] = useState(false);
+  const [imgSrc, setImgSrc] = useState(() => {
+    return quality === 'high'
+      ? `/api/cameras/${camId}/mjpeg?token=${token}&quality=high`
+      : `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`;
+  });
   const imgRef = useRef<HTMLImageElement | null>(null);
-
-  const streamSrc = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}`;
 
   useEffect(() => {
     setError(false);
+
+    if (quality === 'high') {
+      setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=high&_t=${Date.now()}`);
+      return () => {
+        if (imgRef.current) {
+          imgRef.current.src = '';
+          imgRef.current.removeAttribute('src');
+        }
+      };
+    }
+
+    // For preview cards, poll snapshots every 2.5s
+    // This completes and closes the HTTP connection immediately, leaving the browser connection pool 100% free!
+    setImgSrc(`/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
+    const interval = setInterval(() => {
+      if (!document.hidden) {
+        setImgSrc(`/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
+      }
+    }, 2500);
+
     return () => {
+      clearInterval(interval);
       if (imgRef.current) {
         imgRef.current.src = '';
         imgRef.current.removeAttribute('src');
@@ -74,9 +98,11 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
           <button 
             onClick={() => {
               setError(false);
-              if (imgRef.current) {
-                imgRef.current.src = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`;
-              }
+              setImgSrc(
+                quality === 'high'
+                  ? `/api/cameras/${camId}/mjpeg?token=${token}&quality=high&_t=${Date.now()}`
+                  : `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`
+              );
             }}
             className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors"
           >
@@ -86,16 +112,15 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
       )}
       <img 
         ref={imgRef}
-        key={`cam-view-${camId}-${quality}`}
-        src={streamSrc} 
+        src={imgSrc} 
         alt={`Camera ${camId}`}
         className="w-full h-full object-contain"
         onError={() => {
-          setTimeout(() => {
-            if (imgRef.current) {
-              imgRef.current.src = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&retry=${Date.now()}`;
-            }
-          }, 2500);
+          if (quality === 'high') {
+            setTimeout(() => {
+              setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=high&retry=${Date.now()}`);
+            }, 2500);
+          }
         }}
       />
     </div>
@@ -625,6 +650,18 @@ export default function App() {
         }
       });
 
+      socket.on('cameras', (newCameras: CameraData[]) => {
+        setCameras(newCameras);
+      });
+
+      socket.on('videos', (newVideos: VideoData[]) => {
+        setVideos(newVideos);
+      });
+
+      socket.on('logos', (newLogos: any[]) => {
+        setLogos(newLogos);
+      });
+
       socket.on('ffmpeg_log', (log: string) => {
         setFfmpegLogs(prev => [...prev.slice(-49), log]);
       });
@@ -633,12 +670,12 @@ export default function App() {
         setFfmpegLogs([]);
       });
 
-    socket.on('server_ready_for_web', () => {
-      setFfmpegLogs(prev => [...prev.slice(-49), "[CLIENTE] Recebido sinal de prontidão do servidor. Iniciando gravação...\n"]);
-      // Use a small timeout to ensure state has propagated if needed, 
-      // though we'll use the ref to be safe.
-      setTimeout(() => startActualRecorder(), 100);
-    });
+      socket.on('server_ready_for_web', () => {
+        setFfmpegLogs(prev => [...prev.slice(-49), "[CLIENTE] Recebido sinal de prontidão do servidor. Iniciando gravação...\n"]);
+        // Use a small timeout to ensure state has propagated if needed, 
+        // though we'll use the ref to be safe.
+        setTimeout(() => startActualRecorder(), 100);
+      });
 
       return () => {
         socket.disconnect();
@@ -1320,27 +1357,44 @@ export default function App() {
       }
     }
 
-    await fetch('/api/cameras', {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}` 
-      },
-      body: JSON.stringify({ name: newCam.name, rtsp_url: url })
-    });
+    const tempId = Date.now();
+    const optimisticCam: CameraData = { id: tempId, name: newCam.name, rtsp_url: url };
+    setCameras(prev => [...prev, optimisticCam]);
 
     setNewCam({ name: '', rtsp_url: '' });
     generateNewStreamKey();
-    fetchData();
+
+    try {
+      const res = await fetch('/api/cameras', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}` 
+        },
+        body: JSON.stringify({ name: optimisticCam.name, rtsp_url: url })
+      });
+      if (res.ok) {
+        const saved = await res.json();
+        setCameras(prev => prev.map(c => c.id === tempId ? saved : c));
+      }
+    } catch (e) {
+      console.error("Erro ao adicionar câmera:", e);
+      fetchData();
+    }
   };
 
   const deleteCamera = async (id: number) => {
     const token = localStorage.getItem('token');
-    await fetch(`/api/cameras/${id}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    fetchData();
+    setCameras(prev => prev.filter(c => c.id !== id));
+    try {
+      await fetch(`/api/cameras/${id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+    } catch (e) {
+      console.error("Erro ao excluir câmera:", e);
+      fetchData();
+    }
   };
 
   const openEditCamModal = (cam: CameraData) => {
@@ -1379,24 +1433,28 @@ export default function App() {
       }
     }
 
+    const targetId = editingCam.id;
+    const updatedName = editCamName;
+    setCameras(prev => prev.map(c => c.id === targetId ? { ...c, name: updatedName, rtsp_url: finalUrl } : c));
+    setEditingCam(null);
+
     const token = localStorage.getItem('token');
     try {
-      const res = await fetch(`/api/cameras/${editingCam.id}`, {
+      const res = await fetch(`/api/cameras/${targetId}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`
         },
-        body: JSON.stringify({ name: editCamName, rtsp_url: finalUrl })
+        body: JSON.stringify({ name: updatedName, rtsp_url: finalUrl })
       });
-      if (res.ok) {
-        setEditingCam(null);
-        fetchData();
-      } else {
+      if (!res.ok) {
         alert('Erro ao atualizar câmera.');
+        fetchData();
       }
     } catch (err) {
       alert('Erro de conexão ao atualizar câmera.');
+      fetchData();
     }
   };
 

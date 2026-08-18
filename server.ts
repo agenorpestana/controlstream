@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
@@ -761,7 +762,7 @@ async function startServer() {
 
     const cache = snapshotCaches[camId];
     const now = Date.now();
-    const CACHE_TTL = 200; // 0.2s cache TTL for ultra fast snapshot refresh
+    const CACHE_TTL = 1500; // 1.5s cache TTL for lightweight, responsive snapshots without server overload
 
     const FALLBACK_JPEG = Buffer.from([
       0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x01, 0x00, 0x48,
@@ -986,6 +987,7 @@ async function startServer() {
   app.post("/api/cameras", authenticate, async (req, res) => {
     const newCam = { id: Date.now(), ...req.body };
     await dbAddCamera(newCam);
+    io.emit("cameras", getDb().cameras);
     res.json(newCam);
   });
 
@@ -994,12 +996,14 @@ async function startServer() {
     const { name, rtsp_url } = req.body;
     const updated = await dbUpdateCamera(camId, { name, rtsp_url });
     if (!updated) return res.status(404).json({ error: "Câmera não encontrada" });
+    io.emit("cameras", getDb().cameras);
     res.json(updated);
   });
 
   app.delete("/api/cameras/:id", authenticate, async (req, res) => {
     const camId = parseInt(req.params.id);
     await dbDeleteCamera(camId);
+    io.emit("cameras", getDb().cameras);
     res.json({ success: true });
   });
 
@@ -1023,6 +1027,7 @@ async function startServer() {
     };
     await dbAddVideo(newVideo);
     console.log("Vídeo salvo no banco de dados:", newVideo.id);
+    io.emit("videos", getDb().videos);
     res.json(newVideo);
   });
 
@@ -1034,6 +1039,7 @@ async function startServer() {
       const fullPath = path.join(process.cwd(), video.file_path);
       if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
       await dbDeleteVideo(videoId);
+      io.emit("videos", getDb().videos);
     }
     res.json({ success: true });
   });

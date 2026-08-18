@@ -1,3 +1,4 @@
+import "dotenv/config";
 import fs from "fs";
 import path from "path";
 import bcrypt from "bcryptjs";
@@ -131,8 +132,9 @@ export async function initDatabase(): Promise<AppDatabase> {
         password: dbPassword || "",
         database: dbName,
         waitForConnections: true,
-        connectionLimit: 15,
+        connectionLimit: 10,
         queueLimit: 0,
+        connectTimeout: 4000,
         enableKeepAlive: true,
         keepAliveInitialDelay: 10000
       });
