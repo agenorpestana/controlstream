@@ -769,7 +769,7 @@ export default function App() {
 
   const handleToggleNarration = async (enabled: boolean, mode?: 'replace' | 'mix', volume?: number) => {
     const token = localStorage.getItem('token');
-    const targetMode = mode || status?.mic_narration_mode || 'replace';
+    const targetMode = mode || status?.mic_narration_mode || 'mix';
     const targetVol = volume !== undefined ? volume : (status?.mic_narration_volume ?? 100);
 
     if (status) {
@@ -2893,28 +2893,28 @@ export default function App() {
                         <div className="grid grid-cols-2 gap-2">
                           <button
                             type="button"
-                            onClick={() => handleToggleNarration(true, 'replace')}
+                            onClick={() => handleToggleNarration(true, 'mix')}
                             className={`p-2.5 rounded-xl border text-left transition-all ${
-                              (status?.mic_narration_mode || 'replace') === 'replace'
-                                ? 'bg-emerald-500/10 border-emerald-500 text-white'
+                              (status?.mic_narration_mode || 'mix') === 'mix'
+                                ? 'bg-emerald-500/10 border-emerald-500 text-white shadow-sm'
                                 : 'bg-black/20 border-white/5 text-white/50 hover:border-white/10'
                             }`}
                           >
-                            <span className="block text-xs font-bold">Apenas Narração</span>
-                            <span className="block text-[9px] text-white/40 mt-0.5">Substitui o som da câmera</span>
+                            <span className="block text-xs font-bold text-emerald-400">Misturar Áudios</span>
+                            <span className="block text-[9px] text-white/50 mt-0.5">Voz do PC + Som da Câmera</span>
                           </button>
 
                           <button
                             type="button"
-                            onClick={() => handleToggleNarration(true, 'mix')}
+                            onClick={() => handleToggleNarration(true, 'replace')}
                             className={`p-2.5 rounded-xl border text-left transition-all ${
-                              status?.mic_narration_mode === 'mix'
-                                ? 'bg-emerald-500/10 border-emerald-500 text-white'
+                              status?.mic_narration_mode === 'replace'
+                                ? 'bg-emerald-500/10 border-emerald-500 text-white shadow-sm'
                                 : 'bg-black/20 border-white/5 text-white/50 hover:border-white/10'
                             }`}
                           >
-                            <span className="block text-xs font-bold">Misturar Áudios</span>
-                            <span className="block text-[9px] text-white/40 mt-0.5">Voz + Som da câmera IP</span>
+                            <span className="block text-xs font-bold">Apenas Microfone</span>
+                            <span className="block text-[9px] text-white/40 mt-0.5">Muda som da câmera</span>
                           </button>
                         </div>
                       </div>

@@ -415,51 +415,14 @@ async function startServer() {
 
         const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
 
-        // Fast probe or use cached audio presence to avoid delay during camera switches
+        // Fast probe or default to true for IP/RTSP/RTMP cameras
         let probedAudio = cam.has_audio;
-        if (probedAudio === undefined && camAudioCache[cam.id] !== undefined) {
-          probedAudio = camAudioCache[cam.id];
-        }
-
         if (probedAudio === undefined) {
-          probedAudio = await new Promise<boolean>((resolve) => {
-            const probeArgs = [
-              ...(isRtmp ? [] : ["-rtsp_transport", "tcp", "-stimeout", "3000000"]),
-              "-v", "error",
-              "-analyzeduration", "1500000",
-              "-probesize", "1500000",
-              "-show_entries", "stream=codec_type,codec_name",
-              "-of", "default=noprint_wrappers=1",
-              cam.rtsp_url
-            ];
-            
-            const proc = spawn("ffprobe", probeArgs);
-            activeProbeProc = proc;
-            let out = "";
-            proc.stdout.on("data", (d) => { out += d.toString(); });
-            const timer = setTimeout(() => {
-              try { proc.kill("SIGKILL"); } catch (e) {}
-              if (activeProbeProc === proc) activeProbeProc = null;
-              resolve(out.toLowerCase().includes("audio"));
-            }, 2500);
-            proc.on("close", () => {
-              clearTimeout(timer);
-              if (activeProbeProc === proc) activeProbeProc = null;
-              resolve(out.toLowerCase().includes("audio"));
-            });
-            proc.on("error", () => {
-              clearTimeout(timer);
-              if (activeProbeProc === proc) activeProbeProc = null;
-              resolve(false);
-            });
-          });
-          camAudioCache[cam.id] = probedAudio;
-          if (probedAudio) {
-            cam.has_audio = true;
-            saveDb(db);
-          }
+          probedAudio = true;
+          cam.has_audio = true;
+          saveDb(db);
         }
-        hasAudio = Boolean(probedAudio || cam.has_audio);
+        hasAudio = cam.has_audio !== false;
 
         if (isRtmp) {
           inputArgs.push(
@@ -603,20 +566,21 @@ async function startServer() {
       if (type === "web") {
         filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else if (narrationInputIndex !== -1) {
-        if (db.stream_status.mic_narration_mode === "mix" && hasAudio) {
-          addLog(`[SERVER] ÁUDIO MISTO: Misturando voz do narrador (Ganho: ${Math.round(narrationVolume * 100)}%) com o som da câmera.\n`);
+        if (db.stream_status.mic_narration_mode === "replace") {
+          addLog(`[SERVER] ÁUDIO NARRAÇÃO: Transmitindo apenas voz do computador/microfone (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[a_out]`);
+        } else {
+          // Default: "mix" - Misturar voz do narrador + áudio ambiente da câmera para o YouTube
+          addLog(`[SERVER] ÁUDIO MISTO: Misturando som da câmera com microfone do computador (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
           filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[cam_a]`);
           filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
-          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=longest:dropout_transition=2,aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
-        } else {
-          addLog(`[SERVER] ÁUDIO NARRAÇÃO: Transmitindo apenas voz do narrador (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
-          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[a_out]`);
+          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=longest:dropout_transition=0,aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
         }
       } else if (hasAudio) {
-        addLog("[SERVER] ÁUDIO NATIVO: Transmitindo som ambiente da câmera IP para o YouTube.\n");
+        addLog("[SERVER] ÁUDIO DA CÂMERA: Transmitindo som ambiente da câmera IP para o YouTube.\n");
         filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else {
-        addLog("[SERVER] ÁUDIO SILENCIOSO: Câmera sem microfone embutido. Enviando faixa silenciosa para o YouTube.\n");
+        addLog("[SERVER] ÁUDIO SILENCIOSO: Câmera sem áudio. Enviando faixa silenciosa para o YouTube.\n");
         filterComplexParts.push(`[${silenceInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       }
 

@@ -110,7 +110,7 @@ const getDefaultDbState = (): AppDatabase => ({
     logo_position: "top_right",
     block_offline_switch: true,
     mic_narration_enabled: false,
-    mic_narration_mode: "replace",
+    mic_narration_mode: "mix",
     mic_narration_volume: 100
   }
 });
