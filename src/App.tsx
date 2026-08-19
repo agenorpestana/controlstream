@@ -52,30 +52,89 @@ interface StreamStatus {
 const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
   const [error, setError] = useState(false);
-  const [imgSrc, setImgSrc] = useState(() => `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}`);
-  const imgRef = useRef<HTMLImageElement | null>(null);
+  const [activeLayer, setActiveLayer] = useState<'A' | 'B'>('A');
+  const [srcA, setSrcA] = useState(() => `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
+  const [srcB, setSrcB] = useState<string | null>(null);
+  const consecutiveErrorsRef = useRef(0);
+  const lastActiveTimeRef = useRef(Date.now());
 
+  // Seamless, imperceptible auto-refresh every 2 minutes (120,000ms) without any visual blink
   useEffect(() => {
+    consecutiveErrorsRef.current = 0;
+    const initialUrl = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`;
+    setSrcA(initialUrl);
+    setSrcB(null);
+    setActiveLayer('A');
     setError(false);
-    setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
 
-    return () => {
-      if (imgRef.current) {
-        imgRef.current.src = '';
-        imgRef.current.removeAttribute('src');
+    const refreshStreamSilently = () => {
+      const newTimestamp = Date.now();
+      const freshUrl = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${newTimestamp}`;
+      
+      // Preload the new stream in the hidden background layer without touching the active layer
+      setActiveLayer(current => {
+        if (current === 'A') {
+          setSrcB(freshUrl);
+        } else {
+          setSrcA(freshUrl);
+        }
+        return current;
+      });
+    };
+
+    // Auto-refresh timer: 2 minutes
+    const interval = setInterval(refreshStreamSilently, 120 * 1000);
+
+    // Auto-refresh softly when browser tab regains focus after being inactive
+    const handleVisibilityChange = () => {
+      if (!document.hidden && Date.now() - lastActiveTimeRef.current > 30000) {
+        lastActiveTimeRef.current = Date.now();
+        refreshStreamSilently();
       }
     };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, [camId, quality, token]);
+
+  const handleLayerLoad = (layer: 'A' | 'B') => {
+    consecutiveErrorsRef.current = 0;
+    setError(false);
+    // Instantly transition to the freshly connected layer without any black frame
+    setActiveLayer(layer);
+  };
+
+  const handleLayerError = (layer: 'A' | 'B') => {
+    consecutiveErrorsRef.current += 1;
+    // Only display visible error overlay if it failed multiple consecutive times
+    if (consecutiveErrorsRef.current >= 3) {
+      setError(true);
+    }
+    // Silent background retry
+    setTimeout(() => {
+      const retryUrl = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&retry=${Date.now()}`;
+      if (layer === 'A') {
+        setSrcA(retryUrl);
+      } else {
+        setSrcB(retryUrl);
+      }
+    }, 3000);
+  };
 
   return (
     <div className={`relative bg-black/40 overflow-hidden ${className}`}>
       {error && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-black/80 z-10">
+        <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-black/80 z-20">
           <p className="text-red-400 text-[10px] font-bold uppercase mb-2">Aguardando Câmera...</p>
           <button 
             onClick={() => {
+              consecutiveErrorsRef.current = 0;
               setError(false);
-              setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
+              setSrcA(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
+              setActiveLayer('A');
             }}
             className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors cursor-pointer"
           >
@@ -83,19 +142,28 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
           </button>
         </div>
       )}
-      <img 
-        ref={imgRef}
-        src={imgSrc} 
-        alt={`Camera ${camId}`}
-        className="w-full h-full object-contain"
-        onError={() => {
-          setError(true);
-          setTimeout(() => {
-            setError(false);
-            setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&retry=${Date.now()}`);
-          }, 3000);
-        }}
-      />
+
+      {/* Primary Layer A */}
+      {srcA && (
+        <img 
+          src={srcA} 
+          alt={`Camera ${camId} A`}
+          className={`absolute inset-0 w-full h-full object-contain ${activeLayer === 'A' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}
+          onLoad={() => handleLayerLoad('A')}
+          onError={() => handleLayerError('A')}
+        />
+      )}
+
+      {/* Secondary Layer B (Background Preloader / Seamless Swap) */}
+      {srcB && (
+        <img 
+          src={srcB} 
+          alt={`Camera ${camId} B`}
+          className={`absolute inset-0 w-full h-full object-contain ${activeLayer === 'B' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}
+          onLoad={() => handleLayerLoad('B')}
+          onError={() => handleLayerError('B')}
+        />
+      )}
     </div>
   );
 };
