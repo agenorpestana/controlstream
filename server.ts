@@ -976,6 +976,8 @@ async function startServer() {
     });
   });
 
+  let activeCardMjpegProcs: { [camId: number]: any } = {};
+
   app.get("/api/cameras/:id/mjpeg", authenticate, (req, res) => {
     const db = getDb();
     const camId = parseInt(req.params.id);
@@ -984,11 +986,18 @@ async function startServer() {
 
     const isPreview = req.query.quality === "preview";
 
-    // Terminate old active high-quality stream whenever a new one starts
-    if (!isPreview && activeHighQualityMjpegProc) {
-      try { activeHighQualityMjpegProc.kill("SIGKILL"); } catch (e) {}
-      activeHighQualityMjpegProc = null;
-      activeHighQualityCamId = null;
+    // Terminate old active stream for this camera to prevent duplicate FFmpeg processes
+    if (isPreview) {
+      if (activeCardMjpegProcs[camId]) {
+        try { activeCardMjpegProcs[camId].kill("SIGKILL"); } catch (e) {}
+        delete activeCardMjpegProcs[camId];
+      }
+    } else {
+      if (activeHighQualityMjpegProc) {
+        try { activeHighQualityMjpegProc.kill("SIGKILL"); } catch (e) {}
+        activeHighQualityMjpegProc = null;
+        activeHighQualityCamId = null;
+      }
     }
 
     res.writeHead(200, {
@@ -999,9 +1008,9 @@ async function startServer() {
       "X-Accel-Buffering": "no"
     });
 
-    const scaleFilter = isPreview ? "scale=480:-1" : "scale=960:-1";
-    const fpsRate = isPreview ? "15" : "30";
-    const qualityVal = isPreview ? "8" : "4";
+    const scaleFilter = isPreview ? "scale=540:-1" : "scale=960:-1";
+    const fpsRate = isPreview ? "25" : "30";
+    const qualityVal = isPreview ? "6" : "3";
 
     const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
     const transportOpts = isRtmp 
@@ -1021,14 +1030,16 @@ async function startServer() {
       "-an",
       "-c:v", "mjpeg",
       "-q:v", qualityVal,
-      "-g", "15",
+      "-g", "10",
       "-f", "mpjpeg",
       "-boundary_tag", "ffmpeg",
       "-"
     ];
 
     const ff = spawn("ffmpeg", args);
-    if (!isPreview) {
+    if (isPreview) {
+      activeCardMjpegProcs[camId] = ff;
+    } else {
       activeHighQualityMjpegProc = ff;
       activeHighQualityCamId = camId;
     }
@@ -1039,9 +1050,15 @@ async function startServer() {
     const cleanup = () => {
       if (killed) return;
       killed = true;
-      if (activeHighQualityMjpegProc === ff) {
-        activeHighQualityMjpegProc = null;
-        activeHighQualityCamId = null;
+      if (isPreview) {
+        if (activeCardMjpegProcs[camId] === ff) {
+          delete activeCardMjpegProcs[camId];
+        }
+      } else {
+        if (activeHighQualityMjpegProc === ff) {
+          activeHighQualityMjpegProc = null;
+          activeHighQualityCamId = null;
+        }
       }
       try {
         ff.stdout.unpipe(res);
@@ -1064,11 +1081,7 @@ async function startServer() {
       req.socket.on("error", cleanup);
     }
     ff.on("close", () => {
-      killed = true;
-      if (activeHighQualityMjpegProc === ff) {
-        activeHighQualityMjpegProc = null;
-        activeHighQualityCamId = null;
-      }
+      cleanup();
     });
   });
 

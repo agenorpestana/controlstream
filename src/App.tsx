@@ -52,106 +52,53 @@ interface StreamStatus {
 const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
   const [error, setError] = useState(false);
-  const [imgSrc, setImgSrc] = useState<string>(() => 
-    quality === 'preview' 
-      ? `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}` 
-      : `/api/cameras/${camId}/mjpeg?token=${token}&quality=high&_t=${Date.now()}`
-  );
+  const [imgSrc, setImgSrc] = useState<string>(() => `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const isMountedRef = useRef(true);
 
+  const reloadStream = () => {
+    if (!isMountedRef.current) return;
+    setError(false);
+    setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
+  };
+
   useEffect(() => {
     isMountedRef.current = true;
+    reloadStream();
 
-    if (quality === 'preview') {
-      let isFetching = false;
-
-      const fetchNextSnapshot = () => {
-        if (!isMountedRef.current || document.visibilityState !== 'visible' || isFetching) return;
-        isFetching = true;
-
-        const nextUrl = `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`;
-        const preloader = new Image();
-        preloader.onload = () => {
-          if (isMountedRef.current) {
-            setError(false);
-            setImgSrc(nextUrl);
-          }
-          isFetching = false;
-        };
-        preloader.onerror = () => {
-          if (isMountedRef.current) {
-            setError(true);
-          }
-          isFetching = false;
-        };
-        preloader.src = nextUrl;
-      };
-
-      // Initial fetch
-      fetchNextSnapshot();
-
-      // Poll interval for thumbnail cards (1.5s)
-      const interval = setInterval(fetchNextSnapshot, 1500);
-
-      const handleVisibility = () => {
-        if (document.visibilityState === 'visible') {
-          fetchNextSnapshot();
-        }
-      };
-
-      document.addEventListener('visibilitychange', handleVisibility);
-      window.addEventListener('focus', handleVisibility);
-
-      return () => {
-        isMountedRef.current = false;
-        clearInterval(interval);
-        document.removeEventListener('visibilitychange', handleVisibility);
-        window.removeEventListener('focus', handleVisibility);
-      };
-    } else {
-      // High Quality Stream (Main Program Output)
-      const reloadHighQualityStream = () => {
-        if (!isMountedRef.current) return;
-        setError(false);
-        setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=high&_t=${Date.now()}`);
-      };
-
-      reloadHighQualityStream();
-
-      const handleVisibility = () => {
-        if (document.visibilityState === 'visible') {
-          reloadHighQualityStream();
-        } else {
-          // Cleanly close connection when tab is hidden to release browser TCP socket
-          if (imgRef.current) {
-            imgRef.current.src = '';
-          }
-        }
-      };
-
-      document.addEventListener('visibilitychange', handleVisibility);
-      window.addEventListener('focus', reloadHighQualityStream);
-
-      return () => {
-        isMountedRef.current = false;
-        document.removeEventListener('visibilitychange', handleVisibility);
-        window.removeEventListener('focus', reloadHighQualityStream);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        reloadStream();
+      } else {
+        // Detach stream while in another tab so browser sockets and server FFmpeg are freed
         if (imgRef.current) {
           imgRef.current.src = '';
-          imgRef.current.removeAttribute('src');
         }
-      };
-    }
+      }
+    };
+
+    const handleWindowFocus = () => {
+      if (document.visibilityState === 'visible') {
+        reloadStream();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleWindowFocus);
+
+    return () => {
+      isMountedRef.current = false;
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleWindowFocus);
+      if (imgRef.current) {
+        imgRef.current.src = '';
+        imgRef.current.removeAttribute('src');
+      }
+    };
   }, [camId, quality, token]);
 
   const handleManualRetry = () => {
-    setError(false);
-    if (quality === 'preview') {
-      setImgSrc(`/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
-    } else {
-      setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=high&_t=${Date.now()}`);
-    }
+    reloadStream();
   };
 
   return (
