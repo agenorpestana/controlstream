@@ -131,12 +131,13 @@ class NarrationAudioStreamer {
   private lastChunkTime: number = 0;
   private ringBuffer: Buffer[] = [];
   private totalRingBytes: number = 0;
-  private maxRingBytes: number = 176400; // ~1000ms (1 second) of 44.1kHz 16-bit stereo PCM audio
+  private maxRingBytes: number = 35280; // ~200ms of 44.1kHz 16-bit stereo PCM audio
 
   constructor() {
-    // Generate silence ONLY if no client chunks have arrived for > 400ms (mic muted or disconnected)
+    // Generate silence ONLY if no client chunks have arrived for > 350ms (mic muted or disconnected)
+    // This completely prevents interleaving silence between real voice chunks which was causing robotic sound!
     setInterval(() => {
-      if (this.clients.length > 0 && Date.now() - this.lastChunkTime > 400) {
+      if (this.clients.length > 0 && Date.now() - this.lastChunkTime > 350) {
         const silenceChunk = Buffer.alloc(3528, 0); // ~40ms silence
         this.broadcast(silenceChunk);
       }
@@ -191,137 +192,6 @@ class NarrationAudioStreamer {
 }
 
 const narrationStreamer = new NarrationAudioStreamer();
-
-// Shared Camera Stream Multiplexer (Hub) to prevent opening duplicate RTSP connections per camera
-interface StreamSubscriber {
-  res: any;
-  cleanup: () => void;
-}
-
-class CameraStreamHub {
-  private activeStreams: Map<string, {
-    proc: ChildProcess;
-    subscribers: StreamSubscriber[];
-    stopTimeout: NodeJS.Timeout | null;
-  }> = new Map();
-
-  public subscribe(camId: number, quality: 'high' | 'preview', res: any, req: any, camUrl: string) {
-    const key = `${camId}_${quality}`;
-    let stream = this.activeStreams.get(key);
-
-    res.writeHead(200, {
-      "Content-Type": "multipart/x-mixed-replace; boundary=ffmpeg",
-      "Cache-Control": "no-cache, no-store, must-revalidate",
-      "Connection": "close",
-      "Pragma": "no-cache",
-      "X-Accel-Buffering": "no"
-    });
-
-    const isPreview = quality === 'preview';
-    const scaleFilter = isPreview ? "scale=480:-1" : "scale=960:-1";
-    const fpsRate = isPreview ? "15" : "30";
-    const qualityVal = isPreview ? "8" : "4";
-
-    const isRtmp = camUrl && (camUrl.startsWith("rtmp://") || camUrl.startsWith("rtmps://"));
-    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-flags", "+low_delay"];
-
-    if (!stream || !stream.proc || stream.proc.killed || stream.proc.exitCode !== null) {
-      const args = [
-        "-thread_queue_size", "4096",
-        "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
-        "-fpsprobesize", "0",
-        ...transportOpts,
-        "-probesize", "500000",
-        "-analyzeduration", "500000",
-        "-i", camUrl,
-        "-r", fpsRate,
-        "-vf", scaleFilter,
-        "-an",
-        "-c:v", "mjpeg",
-        "-q:v", qualityVal,
-        "-g", "15",
-        "-f", "mpjpeg",
-        "-boundary_tag", "ffmpeg",
-        "-"
-      ];
-
-      const proc = spawn("ffmpeg", args);
-      const subscribers: StreamSubscriber[] = [];
-
-      proc.stdout?.on("data", (chunk: Buffer) => {
-        for (let i = subscribers.length - 1; i >= 0; i--) {
-          const sub = subscribers[i];
-          try {
-            if (!sub.res.writableEnded) {
-              sub.res.write(chunk);
-            }
-          } catch (e) {
-            subscribers.splice(i, 1);
-          }
-        }
-      });
-
-      proc.on("close", () => {
-        this.activeStreams.delete(key);
-        subscribers.forEach(s => {
-          try { if (!s.res.writableEnded) s.res.end(); } catch (e) {}
-        });
-      });
-
-      proc.on("error", (err) => {
-        console.error(`[STREAM HUB] Erro no FFmpeg para ${key}:`, err.message);
-        this.activeStreams.delete(key);
-      });
-
-      stream = {
-        proc,
-        subscribers,
-        stopTimeout: null
-      };
-      this.activeStreams.set(key, stream);
-    } else {
-      if (stream.stopTimeout) {
-        clearTimeout(stream.stopTimeout);
-        stream.stopTimeout = null;
-      }
-    }
-
-    let isCleanedUp = false;
-    const cleanup = () => {
-      if (isCleanedUp) return;
-      isCleanedUp = true;
-      const currentStream = this.activeStreams.get(key);
-      if (currentStream) {
-        const idx = currentStream.subscribers.findIndex(s => s.res === res);
-        if (idx !== -1) currentStream.subscribers.splice(idx, 1);
-
-        if (currentStream.subscribers.length === 0) {
-          if (currentStream.stopTimeout) clearTimeout(currentStream.stopTimeout);
-          currentStream.stopTimeout = setTimeout(() => {
-            if (currentStream.subscribers.length === 0) {
-              try { currentStream.proc.kill("SIGKILL"); } catch (e) {}
-              this.activeStreams.delete(key);
-            }
-          }, 3000);
-        }
-      }
-      try {
-        if (!res.writableEnded) res.end();
-      } catch (e) {}
-    };
-
-    stream.subscribers.push({ res, cleanup });
-
-    req.on("close", cleanup);
-    req.on("aborted", cleanup);
-    req.on("error", cleanup);
-    res.on("close", cleanup);
-    res.on("finish", cleanup);
-    res.on("error", cleanup);
-  }
-}
-
-const cameraStreamHub = new CameraStreamHub();
 
 // Ensure uploads directory exists
 const uploadsDir = path.join(process.cwd(), "uploads");
@@ -545,35 +415,49 @@ async function startServer() {
 
         const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
 
-        // Fast audio presence lookup (non-blocking for instant camera switching)
-        let probedAudio = cam.has_audio ?? camAudioCache[cam.id];
+        // Fast probe or use cached audio presence to avoid delay during camera switches
+        let probedAudio = cam.has_audio;
+        if (probedAudio === undefined && camAudioCache[cam.id] !== undefined) {
+          probedAudio = camAudioCache[cam.id];
+        }
+
         if (probedAudio === undefined) {
-          probedAudio = false; // Default immediately so switch occurs in < 50ms
-          // Run background probe to update cache for next time without blocking the live stream
-          (async () => {
-            try {
-              const probeArgs = [
-                ...(isRtmp ? [] : ["-rtsp_transport", "tcp", "-stimeout", "3000000"]),
-                "-v", "error",
-                "-analyzeduration", "1000000",
-                "-probesize", "1000000",
-                "-show_entries", "stream=codec_type",
-                "-of", "default=noprint_wrappers=1",
-                cam.rtsp_url
-              ];
-              const proc = spawn("ffprobe", probeArgs);
-              let out = "";
-              proc.stdout?.on("data", (d) => { out += d.toString(); });
-              proc.on("close", () => {
-                const detected = out.toLowerCase().includes("audio");
-                camAudioCache[cam.id] = detected;
-                if (detected && !cam.has_audio) {
-                  cam.has_audio = true;
-                  saveDb(getDb());
-                }
-              });
-            } catch (e) {}
-          })();
+          probedAudio = await new Promise<boolean>((resolve) => {
+            const probeArgs = [
+              ...(isRtmp ? [] : ["-rtsp_transport", "tcp", "-stimeout", "3000000"]),
+              "-v", "error",
+              "-analyzeduration", "1500000",
+              "-probesize", "1500000",
+              "-show_entries", "stream=codec_type,codec_name",
+              "-of", "default=noprint_wrappers=1",
+              cam.rtsp_url
+            ];
+            
+            const proc = spawn("ffprobe", probeArgs);
+            activeProbeProc = proc;
+            let out = "";
+            proc.stdout.on("data", (d) => { out += d.toString(); });
+            const timer = setTimeout(() => {
+              try { proc.kill("SIGKILL"); } catch (e) {}
+              if (activeProbeProc === proc) activeProbeProc = null;
+              resolve(out.toLowerCase().includes("audio"));
+            }, 2500);
+            proc.on("close", () => {
+              clearTimeout(timer);
+              if (activeProbeProc === proc) activeProbeProc = null;
+              resolve(out.toLowerCase().includes("audio"));
+            });
+            proc.on("error", () => {
+              clearTimeout(timer);
+              if (activeProbeProc === proc) activeProbeProc = null;
+              resolve(false);
+            });
+          });
+          camAudioCache[cam.id] = probedAudio;
+          if (probedAudio) {
+            cam.has_audio = true;
+            saveDb(db);
+          }
         }
         hasAudio = Boolean(probedAudio || cam.has_audio);
 
@@ -1096,10 +980,94 @@ async function startServer() {
     const db = getDb();
     const camId = parseInt(req.params.id);
     const cam = db.cameras.find((c: any) => c.id === camId);
-    if (!cam || !cam.rtsp_url) return res.status(404).json({ error: "Câmera não encontrada" });
+    if (!cam) return res.status(404).json({ error: "Câmera não encontrada" });
 
     const isPreview = req.query.quality === "preview";
-    cameraStreamHub.subscribe(camId, isPreview ? "preview" : "high", res, req, cam.rtsp_url);
+
+    // Terminate old active high-quality stream ONLY if switching to a DIFFERENT camera ID
+    if (!isPreview && activeHighQualityMjpegProc && activeHighQualityCamId !== camId) {
+      try { activeHighQualityMjpegProc.kill("SIGKILL"); } catch (e) {}
+      activeHighQualityMjpegProc = null;
+      activeHighQualityCamId = null;
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "multipart/x-mixed-replace; boundary=ffmpeg",
+      "Cache-Control": "no-cache, no-store, must-revalidate",
+      "Connection": "close",
+      "Pragma": "no-cache",
+      "X-Accel-Buffering": "no"
+    });
+
+    const scaleFilter = isPreview ? "scale=480:-1" : "scale=960:-1";
+    const fpsRate = isPreview ? "15" : "30";
+    const qualityVal = isPreview ? "8" : "4";
+
+    const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
+    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-flags", "+low_delay"];
+
+    const args = [
+      "-thread_queue_size", "4096",
+      "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
+      "-fpsprobesize", "0",
+      ...transportOpts,
+      "-probesize", "500000",
+      "-analyzeduration", "500000",
+      "-i", cam.rtsp_url,
+      "-r", fpsRate,
+      "-vf", scaleFilter,
+      "-an",
+      "-c:v", "mjpeg",
+      "-q:v", qualityVal,
+      "-g", "15",
+      "-f", "mpjpeg",
+      "-boundary_tag", "ffmpeg",
+      "-"
+    ];
+
+    const ff = spawn("ffmpeg", args);
+    if (!isPreview) {
+      activeHighQualityMjpegProc = ff;
+      activeHighQualityCamId = camId;
+    }
+
+    ff.stdout.pipe(res);
+
+    let killed = false;
+    const cleanup = () => {
+      if (killed) return;
+      killed = true;
+      if (activeHighQualityMjpegProc === ff) {
+        activeHighQualityMjpegProc = null;
+        activeHighQualityCamId = null;
+      }
+      try {
+        ff.stdout.unpipe(res);
+        ff.kill("SIGKILL");
+      } catch (e) {}
+      try {
+        if (!res.writableEnded) res.end();
+      } catch (e) {}
+    };
+
+    req.on("close", cleanup);
+    req.on("aborted", cleanup);
+    req.on("end", cleanup);
+    req.on("error", cleanup);
+    res.on("close", cleanup);
+    res.on("finish", cleanup);
+    res.on("error", cleanup);
+    if (req.socket) {
+      req.socket.on("close", cleanup);
+      req.socket.on("error", cleanup);
+    }
+    ff.on("close", () => {
+      killed = true;
+      if (activeHighQualityMjpegProc === ff) {
+        activeHighQualityMjpegProc = null;
+        activeHighQualityCamId = null;
+      }
+    });
   });
 
   // Dedicated Camera Audio Monitoring Endpoint for Local Audio Return / Fones

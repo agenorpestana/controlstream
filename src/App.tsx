@@ -52,45 +52,20 @@ interface StreamStatus {
 const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
   const [error, setError] = useState(false);
-  const isHighQuality = quality === 'high';
-  const [imgSrc, setImgSrc] = useState<string>(() => {
-    return isHighQuality 
-      ? `/api/cameras/${camId}/mjpeg?token=${token}&quality=high`
-      : `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`;
-  });
+  const [imgSrc, setImgSrc] = useState(() => `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}`);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
   useEffect(() => {
     setError(false);
-    if (isHighQuality) {
-      setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=high&_t=${Date.now()}`);
-      return () => {
-        if (imgRef.current) {
-          imgRef.current.src = '';
-          imgRef.current.removeAttribute('src');
-        }
-      };
-    } else {
-      // For preview cards in the grid, fetch snapshots periodically to avoid locking browser HTTP connection limits
-      let active = true;
-      const updateSnapshot = () => {
-        if (!active) return;
-        setImgSrc(`/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
-      };
+    setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
 
-      updateSnapshot();
-      const interval = setInterval(updateSnapshot, 1000);
-
-      return () => {
-        active = false;
-        clearInterval(interval);
-        if (imgRef.current) {
-          imgRef.current.src = '';
-          imgRef.current.removeAttribute('src');
-        }
-      };
-    }
-  }, [camId, quality, token, isHighQuality]);
+    return () => {
+      if (imgRef.current) {
+        imgRef.current.src = '';
+        imgRef.current.removeAttribute('src');
+      }
+    };
+  }, [camId, quality, token]);
 
   return (
     <div className={`relative bg-black/40 overflow-hidden ${className}`}>
@@ -100,10 +75,7 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
           <button 
             onClick={() => {
               setError(false);
-              setImgSrc(isHighQuality 
-                ? `/api/cameras/${camId}/mjpeg?token=${token}&quality=high&_t=${Date.now()}` 
-                : `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`
-              );
+              setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
             }}
             className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors cursor-pointer"
           >
@@ -120,11 +92,8 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
           setError(true);
           setTimeout(() => {
             setError(false);
-            setImgSrc(isHighQuality 
-              ? `/api/cameras/${camId}/mjpeg?token=${token}&quality=high&retry=${Date.now()}`
-              : `/api/cameras/${camId}/snapshot?token=${token}&retry=${Date.now()}`
-            );
-          }, 2500);
+            setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&retry=${Date.now()}`);
+          }, 3000);
         }}
       />
     </div>
@@ -199,14 +168,7 @@ export default function App() {
   const [logoFile, setLogoFile] = useState<File | null>(null);
   const [isUploadingLogo, setIsUploadingLogo] = useState(false);
   const logoFileInputRef = useRef<HTMLInputElement>(null);
-  const [status, setStatus] = useState<StreamStatus | null>(() => {
-    try {
-      const cached = localStorage.getItem('cached_status');
-      return cached ? JSON.parse(cached) : null;
-    } catch (e) {
-      return null;
-    }
-  });
+  const [status, setStatus] = useState<StreamStatus | null>(null);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'cameras' | 'videos' | 'settings'>('dashboard');
   const [newCam, setNewCam] = useState({ name: '', rtsp_url: '' });
   const [camProtocol, setCamProtocol] = useState<'rtsp' | 'rtmp'>('rtsp');
@@ -854,7 +816,6 @@ export default function App() {
 
       socket.on('stream_status', (newStatus: StreamStatus) => {
         setStatus(newStatus);
-        localStorage.setItem('cached_status', JSON.stringify(newStatus));
         
         const activeEl = document.activeElement;
         const isTyping = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
@@ -1053,17 +1014,14 @@ export default function App() {
       return;
     }
     const headers = { Authorization: `Bearer ${token}` };
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
 
     try {
       const [camsRes, vidsRes, statusRes, logosRes] = await Promise.all([
-        fetch('/api/cameras', { headers, signal: controller.signal }),
-        fetch('/api/videos', { headers, signal: controller.signal }),
-        fetch('/api/status', { headers, signal: controller.signal }),
-        fetch('/api/logos', { headers, signal: controller.signal })
+        fetch('/api/cameras', { headers }),
+        fetch('/api/videos', { headers }),
+        fetch('/api/status', { headers }),
+        fetch('/api/logos', { headers })
       ]);
-      clearTimeout(timeoutId);
       
       if (camsRes.status === 401 || vidsRes.status === 401 || statusRes.status === 401 || logosRes.status === 401) {
         console.warn("[CLIENTE] Sessão expirada ou não autorizada (401). Redirecionando para login.");
@@ -1090,7 +1048,6 @@ export default function App() {
       if (statusRes.ok) {
         const s = await statusRes.json();
         setStatus(s);
-        localStorage.setItem('cached_status', JSON.stringify(s));
         setYtKey(s.youtube_key);
         if (s.system_domain) {
           setSystemDomainInput(s.system_domain);
@@ -1112,11 +1069,8 @@ export default function App() {
           stopWebBroadcast();
         }
       }
-    } catch (e: any) {
-      clearTimeout(timeoutId);
-      if (e.name !== 'AbortError') {
-        console.error("Erro ao sincronizar dados com o servidor:", e);
-      }
+    } catch (e) {
+      console.error("Erro ao sincronizar dados com o servidor:", e);
     }
   };
 
