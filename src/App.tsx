@@ -52,44 +52,25 @@ interface StreamStatus {
 const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
   const [error, setError] = useState(false);
-  const [activeLayer, setActiveLayer] = useState<'A' | 'B'>('A');
-  const [srcA, setSrcA] = useState(() => `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
-  const [srcB, setSrcB] = useState<string | null>(null);
+  const [imgSrc, setImgSrc] = useState(() => `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}`);
+  const imgRef = useRef<HTMLImageElement | null>(null);
   const consecutiveErrorsRef = useRef(0);
   const lastActiveTimeRef = useRef(Date.now());
 
-  // Seamless, imperceptible auto-refresh every 2 minutes (120,000ms) without any visual blink
+  // Auto-refresh softly every 2 minutes (120,000ms) without creating duplicate sockets
   useEffect(() => {
     consecutiveErrorsRef.current = 0;
-    const initialUrl = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`;
-    setSrcA(initialUrl);
-    setSrcB(null);
-    setActiveLayer('A');
     setError(false);
+    setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
 
-    const refreshStreamSilently = () => {
-      const newTimestamp = Date.now();
-      const freshUrl = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${newTimestamp}`;
-      
-      // Preload the new stream in the hidden background layer without touching the active layer
-      setActiveLayer(current => {
-        if (current === 'A') {
-          setSrcB(freshUrl);
-        } else {
-          setSrcA(freshUrl);
-        }
-        return current;
-      });
-    };
+    const interval = setInterval(() => {
+      setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
+    }, 120 * 1000);
 
-    // Auto-refresh timer: 2 minutes
-    const interval = setInterval(refreshStreamSilently, 120 * 1000);
-
-    // Auto-refresh softly when browser tab regains focus after being inactive
     const handleVisibilityChange = () => {
       if (!document.hidden && Date.now() - lastActiveTimeRef.current > 30000) {
         lastActiveTimeRef.current = Date.now();
-        refreshStreamSilently();
+        setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -97,30 +78,25 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
     return () => {
       clearInterval(interval);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (imgRef.current) {
+        imgRef.current.src = '';
+        imgRef.current.removeAttribute('src');
+      }
     };
   }, [camId, quality, token]);
 
-  const handleLayerLoad = (layer: 'A' | 'B') => {
+  const handleLoad = () => {
     consecutiveErrorsRef.current = 0;
     setError(false);
-    // Instantly transition to the freshly connected layer without any black frame
-    setActiveLayer(layer);
   };
 
-  const handleLayerError = (layer: 'A' | 'B') => {
+  const handleError = () => {
     consecutiveErrorsRef.current += 1;
-    // Only display visible error overlay if it failed multiple consecutive times
     if (consecutiveErrorsRef.current >= 3) {
       setError(true);
     }
-    // Silent background retry
     setTimeout(() => {
-      const retryUrl = `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&retry=${Date.now()}`;
-      if (layer === 'A') {
-        setSrcA(retryUrl);
-      } else {
-        setSrcB(retryUrl);
-      }
+      setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&retry=${Date.now()}`);
     }, 3000);
   };
 
@@ -133,8 +109,7 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
             onClick={() => {
               consecutiveErrorsRef.current = 0;
               setError(false);
-              setSrcA(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
-              setActiveLayer('A');
+              setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
             }}
             className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors cursor-pointer"
           >
@@ -143,27 +118,14 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
         </div>
       )}
 
-      {/* Primary Layer A */}
-      {srcA && (
-        <img 
-          src={srcA} 
-          alt={`Camera ${camId} A`}
-          className={`absolute inset-0 w-full h-full object-contain ${activeLayer === 'A' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}
-          onLoad={() => handleLayerLoad('A')}
-          onError={() => handleLayerError('A')}
-        />
-      )}
-
-      {/* Secondary Layer B (Background Preloader / Seamless Swap) */}
-      {srcB && (
-        <img 
-          src={srcB} 
-          alt={`Camera ${camId} B`}
-          className={`absolute inset-0 w-full h-full object-contain ${activeLayer === 'B' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}
-          onLoad={() => handleLayerLoad('B')}
-          onError={() => handleLayerError('B')}
-        />
-      )}
+      <img 
+        ref={imgRef}
+        src={imgSrc} 
+        alt={`Camera ${camId}`}
+        className="w-full h-full object-contain"
+        onLoad={handleLoad}
+        onError={handleError}
+      />
     </div>
   );
 };
@@ -1227,6 +1189,8 @@ export default function App() {
 
   const handleToggleBlockOffline = async (enabled: boolean) => {
     const token = localStorage.getItem('token');
+    // Optimistic UI update
+    setStatus(prev => prev ? { ...prev, block_offline_switch: enabled } : prev);
     try {
       const res = await fetch('/api/status/block-offline', {
         method: 'POST',
@@ -1236,8 +1200,8 @@ export default function App() {
         },
         body: JSON.stringify({ block_offline_switch: enabled })
       });
-      const data = await res.json();
-      if (res.ok && data.status) {
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.status) {
         setStatus(data.status);
       }
     } catch (err) {
