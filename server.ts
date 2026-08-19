@@ -513,7 +513,14 @@ async function startServer() {
       let narrationInputIndex = -1;
       if (db.stream_status.mic_narration_enabled && type !== "web") {
         const narrationUrl = `http://127.0.0.1:${PORT}/internal/narration-audio-pcm`;
-        inputArgs.push("-f", "s16le", "-ar", "44100", "-ac", "2", "-i", narrationUrl);
+        inputArgs.push(
+          "-thread_queue_size", "4096",
+          "-use_wallclock_as_timestamps", "1",
+          "-f", "s16le",
+          "-ar", "44100",
+          "-ac", "2",
+          "-i", narrationUrl
+        );
         narrationInputIndex = nextInputIndex++;
       }
 
@@ -589,28 +596,28 @@ async function startServer() {
         videoOutLabel = "[v_out]";
       }
 
-      // Audio filtering
+      // Audio filtering (Zero Slow-Motion, Clean Resampling)
       let audioOutLabel = "[a_out]";
       const narrationVolume = Math.max(0, (db.stream_status.mic_narration_volume ?? 100) / 100);
 
       if (type === "web") {
-        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else if (narrationInputIndex !== -1) {
         if (db.stream_status.mic_narration_mode === "mix" && hasAudio) {
-          addLog(`[SERVER] ÁUDIO MISTO: Misturando voz do narrador (Ganho: ${Math.round(narrationVolume * 100)}%) com o som original da câmera.\n`);
-          filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[cam_a]`);
-          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
-          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=longest:dropout_transition=2,aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+          addLog(`[SERVER] ÁUDIO MISTO: Misturando voz do narrador (Ganho: ${Math.round(narrationVolume * 100)}%) com o som da câmera.\n`);
+          filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[cam_a]`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
+          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=longest:dropout_transition=2,aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
         } else {
           addLog(`[SERVER] ÁUDIO NARRAÇÃO: Transmitindo apenas voz do narrador (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
-          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[a_out]`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[a_out]`);
         }
       } else if (hasAudio) {
         addLog("[SERVER] ÁUDIO NATIVO: Transmitindo som ambiente da câmera IP para o YouTube.\n");
-        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else {
         addLog("[SERVER] ÁUDIO SILENCIOSO: Câmera sem microfone embutido. Enviando faixa silenciosa para o YouTube.\n");
-        filterComplexParts.push(`[${silenceInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${silenceInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       }
 
       const mappingArgs = ["-map", videoOutLabel, "-map", audioOutLabel];
@@ -992,9 +999,9 @@ async function startServer() {
       "X-Accel-Buffering": "no"
     });
 
-    const scaleFilter = isPreview ? "scale=640:-1" : "scale=960:-1";
-    const fpsRate = "30";
-    const qualityVal = isPreview ? "6" : "4";
+    const scaleFilter = isPreview ? "scale=480:-1" : "scale=960:-1";
+    const fpsRate = isPreview ? "15" : "30";
+    const qualityVal = isPreview ? "8" : "4";
 
     const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
     const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-flags", "+low_delay"];
@@ -1012,7 +1019,7 @@ async function startServer() {
       "-an",
       "-c:v", "mjpeg",
       "-q:v", qualityVal,
-      "-g", "1",
+      "-g", "15",
       "-f", "mpjpeg",
       "-boundary_tag", "ffmpeg",
       "-"
@@ -1060,6 +1067,72 @@ async function startServer() {
         activeHighQualityMjpegProc = null;
         activeHighQualityCamId = null;
       }
+    });
+  });
+
+  // Dedicated Camera Audio Monitoring Endpoint for Local Audio Return / Fones
+  app.get("/api/cameras/:id/audio", authenticate, (req, res) => {
+    const db = getDb();
+    const camId = parseInt(req.params.id);
+    const cam = db.cameras.find((c: any) => c.id === camId);
+    if (!cam) return res.status(404).json({ error: "Câmera não encontrada" });
+
+    res.writeHead(200, {
+      "Content-Type": "audio/mpeg",
+      "Cache-Control": "no-cache, no-store, must-revalidate",
+      "Connection": "close",
+      "Pragma": "no-cache",
+      "X-Accel-Buffering": "no"
+    });
+
+    const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
+    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-flags", "+low_delay"];
+
+    const args = [
+      "-thread_queue_size", "4096",
+      "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
+      ...transportOpts,
+      "-probesize", "500000",
+      "-analyzeduration", "500000",
+      "-i", cam.rtsp_url,
+      "-vn",
+      "-c:a", "libmp3lame",
+      "-b:a", "128k",
+      "-ar", "44100",
+      "-ac", "2",
+      "-f", "mp3",
+      "-"
+    ];
+
+    const ff = spawn("ffmpeg", args);
+    ff.stdout.pipe(res);
+
+    let killed = false;
+    const cleanup = () => {
+      if (killed) return;
+      killed = true;
+      try {
+        ff.stdout.unpipe(res);
+        ff.kill("SIGKILL");
+      } catch (e) {}
+      try {
+        if (!res.writableEnded) res.end();
+      } catch (e) {}
+    };
+
+    req.on("close", cleanup);
+    req.on("aborted", cleanup);
+    req.on("end", cleanup);
+    req.on("error", cleanup);
+    res.on("close", cleanup);
+    res.on("finish", cleanup);
+    res.on("error", cleanup);
+    if (req.socket) {
+      req.socket.on("close", cleanup);
+      req.socket.on("error", cleanup);
+    }
+    ff.on("close", () => {
+      killed = true;
     });
   });
 

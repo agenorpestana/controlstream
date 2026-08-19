@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Camera, Video, Play, Square, Settings, Plus, Trash2, LogOut, Activity, Monitor, Upload, Repeat, RefreshCw, Mic, MicOff, Trophy, Pause, RotateCcw, Edit, AlertTriangle, X, Volume2, Radio } from 'lucide-react';
+import { Camera, Video, Play, Square, Settings, Plus, Trash2, LogOut, Activity, Monitor, Upload, Repeat, RefreshCw, Mic, MicOff, Trophy, Pause, RotateCcw, Edit, AlertTriangle, X, Volume2, Radio, Headphones, VolumeX, Sliders } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { io } from 'socket.io-client';
 
@@ -52,50 +52,14 @@ interface StreamStatus {
 const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
   const [error, setError] = useState(false);
-  const [imgSrc, setImgSrc] = useState(() => {
-    return quality === 'high'
-      ? `/api/cameras/${camId}/mjpeg?token=${token}&quality=high`
-      : `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`;
-  });
+  const [imgSrc, setImgSrc] = useState(() => `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}`);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
   useEffect(() => {
     setError(false);
-
-    if (quality === 'high') {
-      setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=high&_t=${Date.now()}`);
-      return () => {
-        if (imgRef.current) {
-          imgRef.current.src = '';
-          imgRef.current.removeAttribute('src');
-        }
-      };
-    }
-
-    // For preview cards, poll snapshots every 2s with seamless off-screen buffer update
-    let isMounted = true;
-    const fetchNextSnapshot = () => {
-      if (!isMounted || document.hidden) return;
-      const url = `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`;
-      const tempImg = new Image();
-      tempImg.onload = () => {
-        if (isMounted) {
-          setImgSrc(url);
-          setError(false);
-        }
-      };
-      tempImg.onerror = () => {
-        // Keep displaying the current image frame rather than blanking out
-      };
-      tempImg.src = url;
-    };
-
-    fetchNextSnapshot();
-    const interval = setInterval(fetchNextSnapshot, 2000);
+    setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
 
     return () => {
-      isMounted = false;
-      clearInterval(interval);
       if (imgRef.current) {
         imgRef.current.src = '';
         imgRef.current.removeAttribute('src');
@@ -111,13 +75,9 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
           <button 
             onClick={() => {
               setError(false);
-              setImgSrc(
-                quality === 'high'
-                  ? `/api/cameras/${camId}/mjpeg?token=${token}&quality=high&_t=${Date.now()}`
-                  : `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`
-              );
+              setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
             }}
-            className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors"
+            className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors cursor-pointer"
           >
             <RefreshCw className="w-4 h-4 text-white animate-spin" />
           </button>
@@ -129,11 +89,11 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
         alt={`Camera ${camId}`}
         className="w-full h-full object-contain"
         onError={() => {
-          if (quality === 'high') {
-            setTimeout(() => {
-              setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=high&retry=${Date.now()}`);
-            }, 2500);
-          }
+          setError(true);
+          setTimeout(() => {
+            setError(false);
+            setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&retry=${Date.now()}`);
+          }, 3000);
         }}
       />
     </div>
@@ -239,6 +199,15 @@ export default function App() {
   const [requestAudioWithCamera, setRequestAudioWithCamera] = useState(true);
   const [isLocalStreaming, setIsLocalStreaming] = useState(false);
   const isLocalStreamingRef = useRef(false);
+
+  // Audio Monitoring / Retorno de Áudio State
+  const [isAudioMonitorOpen, setIsAudioMonitorOpen] = useState(false);
+  const [isMicMonitorEnabled, setIsMicMonitorEnabled] = useState(false);
+  const [isCamMonitorEnabled, setIsCamMonitorEnabled] = useState(false);
+  const [monitorVolume, setMonitorVolume] = useState(80);
+  const [monitoredCamId, setMonitoredCamId] = useState<number | 'active'>('active');
+  const camAudioMonitorRef = useRef<HTMLAudioElement | null>(null);
+  const monitorGainNodeRef = useRef<GainNode | null>(null);
   
   const updateLocalStreaming = (val: boolean) => {
     setIsLocalStreaming(val);
@@ -523,7 +492,7 @@ export default function App() {
         refreshAudioDevices();
 
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-        const audioCtx = new AudioContextClass({ sampleRate: 44100 });
+        const audioCtx = new AudioContextClass();
         narrationAudioCtxRef.current = audioCtx;
 
         const source = audioCtx.createMediaStreamSource(stream);
@@ -532,12 +501,20 @@ export default function App() {
         gainNode.gain.value = volumeFactor;
         narrationGainNodeRef.current = gainNode;
 
-        // ScriptProcessor with 2048 samples (~46ms buffer at 44.1kHz)
+        const monitorGainNode = audioCtx.createGain();
+        monitorGainNode.gain.value = isMicMonitorEnabled ? (monitorVolume / 100) : 0;
+        monitorGainNodeRef.current = monitorGainNode;
+
+        // ScriptProcessor with 2048 samples (~46ms buffer)
         const processor = audioCtx.createScriptProcessor(2048, 2, 2);
 
         source.connect(gainNode);
         gainNode.connect(processor);
         processor.connect(audioCtx.destination);
+
+        // Connect mic monitoring directly to speakers/headphones
+        source.connect(monitorGainNode);
+        monitorGainNode.connect(audioCtx.destination);
 
         let lastVuUpdate = 0;
 
@@ -545,19 +522,42 @@ export default function App() {
           if (isCancelled) return;
           const left = e.inputBuffer.getChannelData(0);
           const right = e.inputBuffer.numberOfChannels > 1 ? e.inputBuffer.getChannelData(1) : left;
+          const nativeRate = audioCtx.sampleRate || 44100;
 
-          // Convert Float32Array to 16-bit PCM Interleaved Stereo
-          const pcmData = new Int16Array(left.length * 2);
+          // Convert Float32Array to 16-bit PCM Interleaved Stereo at exactly 44.1kHz
+          let pcmData: Int16Array;
           let sumSquares = 0;
 
-          for (let i = 0; i < left.length; i++) {
-            let sL = Math.max(-1, Math.min(1, left[i]));
-            pcmData[i * 2] = sL < 0 ? sL * 0x8000 : sL * 0x7FFF;
+          if (nativeRate === 44100) {
+            pcmData = new Int16Array(left.length * 2);
+            for (let i = 0; i < left.length; i++) {
+              let sL = Math.max(-1, Math.min(1, left[i]));
+              let sR = Math.max(-1, Math.min(1, right[i]));
+              pcmData[i * 2] = sL < 0 ? sL * 0x8000 : sL * 0x7FFF;
+              pcmData[i * 2 + 1] = sR < 0 ? sR * 0x8000 : sR * 0x7FFF;
+              sumSquares += (sL * sL + sR * sR) / 2;
+            }
+          } else {
+            // High-precision linear interpolation resampling from nativeRate to 44100
+            const targetLength = Math.round((left.length * 44100) / nativeRate);
+            pcmData = new Int16Array(targetLength * 2);
+            const ratio = (left.length - 1) / Math.max(1, targetLength - 1);
 
-            let sR = Math.max(-1, Math.min(1, right[i]));
-            pcmData[i * 2 + 1] = sR < 0 ? sR * 0x8000 : sR * 0x7FFF;
+            for (let i = 0; i < targetLength; i++) {
+              const srcPos = i * ratio;
+              const srcIndex = Math.floor(srcPos);
+              const frac = srcPos - srcIndex;
+              const nextIndex = Math.min(srcIndex + 1, left.length - 1);
 
-            sumSquares += (sL * sL + sR * sR) / 2;
+              let sL = left[srcIndex] + frac * (left[nextIndex] - left[srcIndex]);
+              let sR = right[srcIndex] + frac * (right[nextIndex] - right[srcIndex]);
+              sL = Math.max(-1, Math.min(1, sL));
+              sR = Math.max(-1, Math.min(1, sR));
+
+              pcmData[i * 2] = sL < 0 ? sL * 0x8000 : sL * 0x7FFF;
+              pcmData[i * 2 + 1] = sR < 0 ? sR * 0x8000 : sR * 0x7FFF;
+              sumSquares += (sL * sL + sR * sR) / 2;
+            }
           }
 
           // Emit binary PCM buffer over Socket.io
@@ -569,7 +569,7 @@ export default function App() {
           const now = performance.now();
           if (now - lastVuUpdate > 70) {
             lastVuUpdate = now;
-            const rms = Math.sqrt(sumSquares / left.length);
+            const rms = Math.sqrt(sumSquares / Math.max(1, left.length));
             const level = Math.min(100, Math.round(rms * 250));
             setMicAudioLevel(level);
           }
@@ -593,9 +593,40 @@ export default function App() {
         narrationAudioCtxRef.current = null;
       }
       narrationGainNodeRef.current = null;
+      monitorGainNodeRef.current = null;
       setMicAudioLevel(0);
     };
   }, [Boolean(status?.mic_narration_enabled), selectedAudioDeviceId]);
+
+  // Sync Mic Monitor Gain Node
+  useEffect(() => {
+    if (monitorGainNodeRef.current) {
+      monitorGainNodeRef.current.gain.value = isMicMonitorEnabled ? (monitorVolume / 100) : 0;
+    }
+  }, [isMicMonitorEnabled, monitorVolume]);
+
+  // Sync Camera Audio Monitor Playback
+  useEffect(() => {
+    const audioEl = camAudioMonitorRef.current;
+    if (!audioEl) return;
+
+    const targetCamId = monitoredCamId === 'active' 
+      ? (status?.current_source_type === 'camera' ? status.current_source_id : (cameras[0]?.id || null))
+      : monitoredCamId;
+
+    if (isCamMonitorEnabled && targetCamId) {
+      const token = localStorage.getItem('token');
+      const url = `/api/cameras/${targetCamId}/audio?token=${token}&_t=${Date.now()}`;
+      if (audioEl.src !== url) {
+        audioEl.src = url;
+      }
+      audioEl.volume = Math.max(0, Math.min(1, monitorVolume / 100));
+      audioEl.play().catch(e => console.log("[MONITOR] Autoplay:", e));
+    } else {
+      audioEl.pause();
+      audioEl.src = '';
+    }
+  }, [isCamMonitorEnabled, monitoredCamId, status?.current_source_id, status?.current_source_type, monitorVolume, cameras]);
 
   const handleToggleNarration = async (enabled: boolean, mode?: 'replace' | 'mix', volume?: number) => {
     const token = localStorage.getItem('token');
@@ -1764,7 +1795,7 @@ export default function App() {
 
       {/* Main Content */}
       <main className="flex-1 overflow-y-auto p-6 lg:p-10">
-        {/* Hidden elements for capture and composition - persistent across tabs */}
+        {/* Hidden elements for capture, composition and audio return monitoring - persistent across tabs */}
         <div className="fixed opacity-0 pointer-events-none w-0 h-0 overflow-hidden">
           <canvas 
             ref={canvasRef} 
@@ -1773,27 +1804,159 @@ export default function App() {
           />
           <video ref={screenVideoRef} autoPlay muted playsInline />
           <video ref={cameraVideoRef} autoPlay muted playsInline />
+          <audio ref={camAudioMonitorRef} playsInline />
         </div>
 
-        <header className="mb-10 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <header className="mb-10 flex flex-col md:flex-row md:items-center justify-between gap-4 relative">
           <div>
             <h2 className="text-3xl font-bold capitalize">{activeTab === 'dashboard' ? 'Painel de Controle' : activeTab === 'cameras' ? 'Câmeras' : activeTab === 'videos' ? 'Vídeos Comerciais' : 'Configurações'}</h2>
             <p className="text-white/40 mt-1">Gerencie sua infraestrutura de transmissão ao vivo</p>
           </div>
           
-          <div className="flex items-center gap-4 bg-[#151619] p-2 rounded-2xl border border-white/10">
-            <div className={`w-3 h-3 rounded-full ${status?.is_streaming ? 'bg-red-500 animate-pulse' : 'bg-white/20'}`} />
-            <span className="text-sm font-mono uppercase tracking-wider">
-              {status?.is_streaming ? 'Ao Vivo' : 'Em Espera'}
-            </span>
-            {status?.is_streaming && (
+          <div className="flex items-center gap-3">
+            {/* Botão de Retorno de Áudio (Monitor de Fone de Ouvido) */}
+            <div className="relative">
               <button 
-                onClick={stopStream}
-                className="bg-red-500/20 hover:bg-red-500/30 text-red-400 px-4 py-1.5 rounded-lg text-xs font-bold transition-all"
+                onClick={() => setIsAudioMonitorOpen(!isAudioMonitorOpen)}
+                className={`flex items-center gap-2.5 px-3.5 py-2.5 rounded-2xl border transition-all cursor-pointer shadow-sm ${
+                  (isMicMonitorEnabled || isCamMonitorEnabled) 
+                    ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 shadow-amber-500/10' 
+                    : 'bg-[#151619] border-white/10 text-white/70 hover:bg-white/5 hover:text-white'
+                }`}
+                title="Retorno de Áudio (Monitorar Microfone e Câmeras)"
               >
-                PARAR
+                <Headphones size={17} className={(isMicMonitorEnabled || isCamMonitorEnabled) ? 'text-amber-400 animate-pulse' : 'text-white/60'} />
+                <span className="text-xs font-bold font-mono">
+                  {(isMicMonitorEnabled || isCamMonitorEnabled) ? 'Retorno: LIGADO' : 'Retorno de Áudio'}
+                </span>
               </button>
-            )}
+
+              {/* Painel Flyout de Retorno de Áudio */}
+              <AnimatePresence>
+                {isAudioMonitorOpen && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                    className="absolute right-0 top-full mt-2 w-80 bg-[#151619] border border-white/15 rounded-3xl p-5 shadow-2xl z-50 backdrop-blur-xl"
+                  >
+                    <div className="flex items-center justify-between pb-3 border-b border-white/10">
+                      <div className="flex items-center gap-2">
+                        <Headphones className="text-amber-400" size={18} />
+                        <h4 className="text-sm font-bold text-white">Retorno de Áudio</h4>
+                      </div>
+                      <button 
+                        onClick={() => setIsAudioMonitorOpen(false)}
+                        className="text-white/40 hover:text-white p-1 rounded-lg hover:bg-white/5 transition-colors"
+                      >
+                        <X size={16} />
+                      </button>
+                    </div>
+
+                    <div className="space-y-4 pt-3">
+                      {/* Retorno do Microfone */}
+                      <div className="bg-black/30 p-3 rounded-2xl border border-white/5 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <Mic size={15} className={isMicMonitorEnabled ? 'text-emerald-400' : 'text-white/40'} />
+                            <div>
+                              <span className="text-xs font-bold block text-white">Retorno do Microfone</span>
+                              <span className="text-[9px] text-white/40 block">Escutar sua própria voz nos fones</span>
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => setIsMicMonitorEnabled(!isMicMonitorEnabled)}
+                            className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                              isMicMonitorEnabled
+                                ? 'bg-emerald-500 text-white'
+                                : 'bg-white/10 text-white/50 hover:bg-white/20'
+                            }`}
+                          >
+                            {isMicMonitorEnabled ? 'ON' : 'OFF'}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Retorno da Câmera */}
+                      <div className="bg-black/30 p-3 rounded-2xl border border-white/5 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <Radio size={15} className={isCamMonitorEnabled ? 'text-amber-400 animate-pulse' : 'text-white/40'} />
+                            <div>
+                              <span className="text-xs font-bold block text-white">Retorno da Câmera</span>
+                              <span className="text-[9px] text-white/40 block">Escutar o som da câmera ao vivo</span>
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => setIsCamMonitorEnabled(!isCamMonitorEnabled)}
+                            className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                              isCamMonitorEnabled
+                                ? 'bg-amber-500 text-black'
+                                : 'bg-white/10 text-white/50 hover:bg-white/20'
+                            }`}
+                          >
+                            {isCamMonitorEnabled ? 'ON' : 'OFF'}
+                          </button>
+                        </div>
+
+                        {cameras.length > 0 && (
+                          <div>
+                            <label className="block text-[9px] font-mono text-white/40 uppercase mb-1">Fonte da Câmera</label>
+                            <select
+                              value={monitoredCamId}
+                              onChange={(e) => setMonitoredCamId(e.target.value === 'active' ? 'active' : parseInt(e.target.value))}
+                              className="w-full bg-black/50 border border-white/10 rounded-xl px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-amber-500 font-mono"
+                            >
+                              <option value="active">Câmera Ativa na Transmissão</option>
+                              {cameras.map(c => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Volume Geral do Retorno */}
+                      <div className="bg-black/30 p-3 rounded-2xl border border-white/5">
+                        <div className="flex items-center justify-between text-[10px] font-mono uppercase text-white/40 mb-2">
+                          <span className="flex items-center gap-1.5">
+                            <Volume2 size={12} />
+                            Volume dos Fones
+                          </span>
+                          <span className="font-bold text-amber-400">{monitorVolume}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          value={monitorVolume}
+                          onChange={(e) => setMonitorVolume(parseInt(e.target.value))}
+                          className="w-full accent-amber-500 h-1.5 bg-black/40 rounded-lg cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+
+            {/* Status Ao Vivo */}
+            <div className="flex items-center gap-4 bg-[#151619] p-2 px-3 rounded-2xl border border-white/10">
+              <div className={`w-3 h-3 rounded-full ${status?.is_streaming ? 'bg-red-500 animate-pulse' : 'bg-white/20'}`} />
+              <span className="text-sm font-mono uppercase tracking-wider font-semibold">
+                {status?.is_streaming ? 'Ao Vivo' : 'Em Espera'}
+              </span>
+              {status?.is_streaming && (
+                <button 
+                  onClick={stopStream}
+                  className="bg-red-500/20 hover:bg-red-500/30 text-red-400 px-4 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                >
+                  PARAR
+                </button>
+              )}
+            </div>
           </div>
         </header>
 
@@ -2615,6 +2778,39 @@ export default function App() {
                           onChange={(e) => handleToggleNarration(true, undefined, parseInt(e.target.value))}
                           className="w-full accent-emerald-500 h-1.5 bg-black/40 rounded-lg cursor-pointer"
                         />
+                      </div>
+
+                      {/* Atalho de Retorno de Áudio (Fones de Ouvido) */}
+                      <div className="bg-amber-500/10 rounded-2xl p-3.5 border border-amber-500/20 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <Headphones size={16} className="text-amber-400" />
+                            <div>
+                              <span className="text-xs font-bold text-amber-300 block">Retorno nos Fones (Monitor)</span>
+                              <span className="text-[9px] text-amber-400/60 block">Ouvir microfone e câmeras diretamente nos fones</span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setIsAudioMonitorOpen(true)}
+                            className="px-3 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded-lg text-xs font-bold font-mono transition-colors cursor-pointer"
+                          >
+                            CONFIGURAR
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-2 pt-1 border-t border-amber-500/10 text-[10px] font-mono text-amber-200/80">
+                          <span className="flex items-center gap-1">
+                            <span className={`w-1.5 h-1.5 rounded-full ${isMicMonitorEnabled ? 'bg-emerald-400' : 'bg-white/20'}`} />
+                            Mic: {isMicMonitorEnabled ? 'ON' : 'OFF'}
+                          </span>
+                          <span>•</span>
+                          <span className="flex items-center gap-1">
+                            <span className={`w-1.5 h-1.5 rounded-full ${isCamMonitorEnabled ? 'bg-amber-400' : 'bg-white/20'}`} />
+                            Câmera: {isCamMonitorEnabled ? 'ON' : 'OFF'}
+                          </span>
+                          <span>•</span>
+                          <span>Vol: {monitorVolume}%</span>
+                        </div>
                       </div>
                     </div>
                   )}
