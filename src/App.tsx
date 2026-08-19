@@ -505,12 +505,7 @@ export default function App() {
         monitorGainNode.gain.value = isMicMonitorEnabled ? (monitorVolume / 100) : 0;
         monitorGainNodeRef.current = monitorGainNode;
 
-        // ScriptProcessor with 2048 samples (~46ms buffer)
-        const processor = audioCtx.createScriptProcessor(2048, 2, 2);
-
         source.connect(gainNode);
-        gainNode.connect(processor);
-        processor.connect(audioCtx.destination);
 
         // Connect mic monitoring directly to speakers/headphones
         source.connect(monitorGainNode);
@@ -518,62 +513,177 @@ export default function App() {
 
         let lastVuUpdate = 0;
 
-        processor.onaudioprocess = (e) => {
+        // Modern, non-deprecated AudioWorklet implementation
+        const workletCode = `
+          class PcmCaptureProcessor extends AudioWorkletProcessor {
+            constructor() {
+              super();
+              this.bufferSize = 2048;
+              this.leftAcc = new Float32Array(this.bufferSize);
+              this.rightAcc = new Float32Array(this.bufferSize);
+              this.sampleCount = 0;
+            }
+
+            process(inputs, outputs, parameters) {
+              const input = inputs[0];
+              if (!input || !input[0] || input[0].length === 0) return true;
+
+              const left = input[0];
+              const right = input.length > 1 ? input[1] : left;
+              const len = left.length;
+
+              for (let i = 0; i < len; i++) {
+                this.leftAcc[this.sampleCount] = left[i];
+                this.rightAcc[this.sampleCount] = right[i];
+                this.sampleCount++;
+
+                if (this.sampleCount >= this.bufferSize) {
+                  const currentRate = sampleRate || 44100;
+                  let pcmData;
+                  let sumSquares = 0;
+
+                  if (currentRate === 44100) {
+                    pcmData = new Int16Array(this.bufferSize * 2);
+                    for (let j = 0; j < this.bufferSize; j++) {
+                      let sL = Math.max(-1, Math.min(1, this.leftAcc[j]));
+                      let sR = Math.max(-1, Math.min(1, this.rightAcc[j]));
+                      pcmData[j * 2] = sL < 0 ? sL * 0x8000 : sL * 0x7FFF;
+                      pcmData[j * 2 + 1] = sR < 0 ? sR * 0x8000 : sR * 0x7FFF;
+                      sumSquares += (sL * sL + sR * sR) / 2;
+                    }
+                  } else {
+                    const targetLength = Math.round((this.bufferSize * 44100) / currentRate);
+                    pcmData = new Int16Array(targetLength * 2);
+                    const ratio = (this.bufferSize - 1) / Math.max(1, targetLength - 1);
+
+                    for (let j = 0; j < targetLength; j++) {
+                      const srcPos = j * ratio;
+                      const srcIndex = Math.floor(srcPos);
+                      const frac = srcPos - srcIndex;
+                      const nextIndex = Math.min(srcIndex + 1, this.bufferSize - 1);
+
+                      let sL = this.leftAcc[srcIndex] + frac * (this.leftAcc[nextIndex] - this.leftAcc[srcIndex]);
+                      let sR = this.rightAcc[srcIndex] + frac * (this.rightAcc[nextIndex] - this.rightAcc[srcIndex]);
+                      sL = Math.max(-1, Math.min(1, sL));
+                      sR = Math.max(-1, Math.min(1, sR));
+
+                      pcmData[j * 2] = sL < 0 ? sL * 0x8000 : sL * 0x7FFF;
+                      pcmData[j * 2 + 1] = sR < 0 ? sR * 0x8000 : sR * 0x7FFF;
+                      sumSquares += (sL * sL + sR * sR) / 2;
+                    }
+                  }
+
+                  const rms = Math.sqrt(sumSquares / Math.max(1, this.bufferSize));
+                  const level = Math.min(100, Math.round(rms * 250));
+
+                  this.port.postMessage({ pcm: pcmData.buffer, level }, [pcmData.buffer]);
+                  this.sampleCount = 0;
+                }
+              }
+              return true;
+            }
+          }
+          registerProcessor('pcm-capture-processor', PcmCaptureProcessor);
+        `;
+
+        if (audioCtx.audioWorklet) {
+          const blob = new Blob([workletCode], { type: 'application/javascript' });
+          const blobUrl = URL.createObjectURL(blob);
+          
+          try {
+            await audioCtx.audioWorklet.addModule(blobUrl);
+            URL.revokeObjectURL(blobUrl);
+
+            if (isCancelled) return;
+
+            const workletNode = new AudioWorkletNode(audioCtx, 'pcm-capture-processor');
+            workletNode.port.onmessage = (event) => {
+              if (isCancelled) return;
+              const { pcm, level } = event.data;
+
+              // Emit binary PCM buffer over Socket.io
+              if (socketRef.current && socketRef.current.connected && pcm) {
+                socketRef.current.emit("narration_pcm_chunk", pcm);
+              }
+
+              // Update VU level indicator
+              const now = performance.now();
+              if (now - lastVuUpdate > 70) {
+                lastVuUpdate = now;
+                setMicAudioLevel(level || 0);
+              }
+            };
+
+            gainNode.connect(workletNode);
+            workletNode.connect(audioCtx.destination);
+          } catch (workletErr) {
+            console.warn("Falha ao inicializar AudioWorklet, usando fallback:", workletErr);
+            URL.revokeObjectURL(blobUrl);
+            setupFallbackProcessor();
+          }
+        } else {
+          setupFallbackProcessor();
+        }
+
+        function setupFallbackProcessor() {
           if (isCancelled) return;
-          const left = e.inputBuffer.getChannelData(0);
-          const right = e.inputBuffer.numberOfChannels > 1 ? e.inputBuffer.getChannelData(1) : left;
-          const nativeRate = audioCtx.sampleRate || 44100;
+          const processor = audioCtx.createScriptProcessor(2048, 2, 2);
+          gainNode.connect(processor);
+          processor.connect(audioCtx.destination);
 
-          // Convert Float32Array to 16-bit PCM Interleaved Stereo at exactly 44.1kHz
-          let pcmData: Int16Array;
-          let sumSquares = 0;
+          processor.onaudioprocess = (e) => {
+            if (isCancelled) return;
+            const left = e.inputBuffer.getChannelData(0);
+            const right = e.inputBuffer.numberOfChannels > 1 ? e.inputBuffer.getChannelData(1) : left;
+            const nativeRate = audioCtx.sampleRate || 44100;
 
-          if (nativeRate === 44100) {
-            pcmData = new Int16Array(left.length * 2);
-            for (let i = 0; i < left.length; i++) {
-              let sL = Math.max(-1, Math.min(1, left[i]));
-              let sR = Math.max(-1, Math.min(1, right[i]));
-              pcmData[i * 2] = sL < 0 ? sL * 0x8000 : sL * 0x7FFF;
-              pcmData[i * 2 + 1] = sR < 0 ? sR * 0x8000 : sR * 0x7FFF;
-              sumSquares += (sL * sL + sR * sR) / 2;
+            let pcmData: Int16Array;
+            let sumSquares = 0;
+
+            if (nativeRate === 44100) {
+              pcmData = new Int16Array(left.length * 2);
+              for (let i = 0; i < left.length; i++) {
+                let sL = Math.max(-1, Math.min(1, left[i]));
+                let sR = Math.max(-1, Math.min(1, right[i]));
+                pcmData[i * 2] = sL < 0 ? sL * 0x8000 : sL * 0x7FFF;
+                pcmData[i * 2 + 1] = sR < 0 ? sR * 0x8000 : sR * 0x7FFF;
+                sumSquares += (sL * sL + sR * sR) / 2;
+              }
+            } else {
+              const targetLength = Math.round((left.length * 44100) / nativeRate);
+              pcmData = new Int16Array(targetLength * 2);
+              const ratio = (left.length - 1) / Math.max(1, targetLength - 1);
+
+              for (let i = 0; i < targetLength; i++) {
+                const srcPos = i * ratio;
+                const srcIndex = Math.floor(srcPos);
+                const frac = srcPos - srcIndex;
+                const nextIndex = Math.min(srcIndex + 1, left.length - 1);
+
+                let sL = left[srcIndex] + frac * (left[nextIndex] - left[srcIndex]);
+                let sR = right[srcIndex] + frac * (right[nextIndex] - right[srcIndex]);
+                sL = Math.max(-1, Math.min(1, sL));
+                sR = Math.max(-1, Math.min(1, sR));
+
+                pcmData[i * 2] = sL < 0 ? sL * 0x8000 : sL * 0x7FFF;
+                pcmData[i * 2 + 1] = sR < 0 ? sR * 0x8000 : sR * 0x7FFF;
+                sumSquares += (sL * sL + sR * sR) / 2;
+              }
             }
-          } else {
-            // High-precision linear interpolation resampling from nativeRate to 44100
-            const targetLength = Math.round((left.length * 44100) / nativeRate);
-            pcmData = new Int16Array(targetLength * 2);
-            const ratio = (left.length - 1) / Math.max(1, targetLength - 1);
 
-            for (let i = 0; i < targetLength; i++) {
-              const srcPos = i * ratio;
-              const srcIndex = Math.floor(srcPos);
-              const frac = srcPos - srcIndex;
-              const nextIndex = Math.min(srcIndex + 1, left.length - 1);
-
-              let sL = left[srcIndex] + frac * (left[nextIndex] - left[srcIndex]);
-              let sR = right[srcIndex] + frac * (right[nextIndex] - right[srcIndex]);
-              sL = Math.max(-1, Math.min(1, sL));
-              sR = Math.max(-1, Math.min(1, sR));
-
-              pcmData[i * 2] = sL < 0 ? sL * 0x8000 : sL * 0x7FFF;
-              pcmData[i * 2 + 1] = sR < 0 ? sR * 0x8000 : sR * 0x7FFF;
-              sumSquares += (sL * sL + sR * sR) / 2;
+            if (socketRef.current && socketRef.current.connected) {
+              socketRef.current.emit("narration_pcm_chunk", pcmData.buffer);
             }
-          }
 
-          // Emit binary PCM buffer over Socket.io
-          if (socketRef.current && socketRef.current.connected) {
-            socketRef.current.emit("narration_pcm_chunk", pcmData.buffer);
-          }
-
-          // Update VU level indicator
-          const now = performance.now();
-          if (now - lastVuUpdate > 70) {
-            lastVuUpdate = now;
-            const rms = Math.sqrt(sumSquares / Math.max(1, left.length));
-            const level = Math.min(100, Math.round(rms * 250));
-            setMicAudioLevel(level);
-          }
-        };
+            const now = performance.now();
+            if (now - lastVuUpdate > 70) {
+              lastVuUpdate = now;
+              const rms = Math.sqrt(sumSquares / Math.max(1, left.length));
+              const level = Math.min(100, Math.round(rms * 250));
+              setMicAudioLevel(level);
+            }
+          };
+        }
       } catch (err: any) {
         console.error("Erro ao iniciar captura do áudio do computador:", err);
         setFfmpegLogs(prev => [...prev.slice(-49), `[SISTEMA] Erro no áudio da narração: ${err.message}\n`]);
