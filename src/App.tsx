@@ -72,16 +72,29 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
       };
     }
 
-    // For preview cards, poll snapshots every 2.5s
-    // This completes and closes the HTTP connection immediately, leaving the browser connection pool 100% free!
-    setImgSrc(`/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
-    const interval = setInterval(() => {
-      if (!document.hidden) {
-        setImgSrc(`/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
-      }
-    }, 2500);
+    // For preview cards, poll snapshots every 2s with seamless off-screen buffer update
+    let isMounted = true;
+    const fetchNextSnapshot = () => {
+      if (!isMounted || document.hidden) return;
+      const url = `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`;
+      const tempImg = new Image();
+      tempImg.onload = () => {
+        if (isMounted) {
+          setImgSrc(url);
+          setError(false);
+        }
+      };
+      tempImg.onerror = () => {
+        // Keep displaying the current image frame rather than blanking out
+      };
+      tempImg.src = url;
+    };
+
+    fetchNextSnapshot();
+    const interval = setInterval(fetchNextSnapshot, 2000);
 
     return () => {
+      isMounted = false;
       clearInterval(interval);
       if (imgRef.current) {
         imgRef.current.src = '';

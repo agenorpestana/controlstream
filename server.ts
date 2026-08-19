@@ -125,7 +125,7 @@ if (!getAvailableFontFile()) {
   });
 }
 
-// Narration Audio Streamer (PCM 16-bit 44.1kHz Stereo) with Circular Buffer for Zero Dropouts
+// Narration Audio Streamer (PCM 16-bit 44.1kHz Stereo) with Clean Streaming for Zero Robotic Artifacts
 class NarrationAudioStreamer {
   private clients: ((chunk: Buffer) => void)[] = [];
   private lastChunkTime: number = 0;
@@ -134,12 +134,12 @@ class NarrationAudioStreamer {
   private maxRingBytes: number = 35280; // ~200ms of 44.1kHz 16-bit stereo PCM audio
 
   constructor() {
-    // Generate constant 44.1kHz stereo silence ticks (every 40ms = ~3528 bytes) if no mic chunk arrived
-    // This guarantees FFmpeg's audio pipe never stutters, blocks, or falls out of sync
+    // Generate silence ONLY if no client chunks have arrived for > 350ms (mic muted or disconnected)
+    // This completely prevents interleaving silence between real voice chunks which was causing robotic sound!
     setInterval(() => {
-      if (Date.now() - this.lastChunkTime > 80 && this.clients.length > 0) {
-        const silenceChunk = Buffer.alloc(3528, 0);
-        this.pushChunk(silenceChunk, true);
+      if (this.clients.length > 0 && Date.now() - this.lastChunkTime > 350) {
+        const silenceChunk = Buffer.alloc(3528, 0); // ~40ms silence
+        this.broadcast(silenceChunk);
       }
     }, 40);
   }
@@ -149,7 +149,7 @@ class NarrationAudioStreamer {
       this.lastChunkTime = Date.now();
     }
     
-    // Store in circular buffer
+    // Store in circular buffer for instant priming on camera switch
     this.ringBuffer.push(buf);
     this.totalRingBytes += buf.length;
     while (this.totalRingBytes > this.maxRingBytes && this.ringBuffer.length > 1) {
@@ -172,7 +172,7 @@ class NarrationAudioStreamer {
 
   public subscribe(cb: (chunk: Buffer) => void) {
     // When a newly spawned FFmpeg process connects during a camera switch,
-    // immediately prime it with recent audio so there is zero gap or silence stutter
+    // immediately prime it with clean audio buffer
     if (this.ringBuffer.length > 0) {
       for (const chunk of this.ringBuffer) {
         try {
@@ -344,8 +344,12 @@ async function startServer() {
   app.use(express.json());
   app.use("/uploads", express.static(uploadsDir));
 
+  let manualStop = false;
   const stopStream = (isSwitching = false) => {
     console.log(`[SERVER] stopStream chamado (isSwitching=${isSwitching})`);
+    if (!isSwitching) {
+      manualStop = true;
+    }
     if (ffmpegProcess) {
       ffmpegProcess.removeAllListeners("close");
       ffmpegProcess.removeAllListeners("exit");
@@ -370,6 +374,7 @@ async function startServer() {
   const camAudioCache: Record<number | string, boolean> = {};
 
   const startStream = async (type: "camera" | "video" | "web", id: number | string) => {
+    manualStop = false;
     // If a probe is already running, cancel it so the new request can execute immediately
     if (activeProbeProc) {
       try { activeProbeProc.kill("SIGKILL"); } catch (e) {}
@@ -418,24 +423,15 @@ async function startServer() {
 
         if (probedAudio === undefined) {
           probedAudio = await new Promise<boolean>((resolve) => {
-            const probeArgs = isRtmp 
-              ? [
-                  "-v", "error",
-                  "-analyzeduration", "500000",
-                  "-probesize", "500000",
-                  "-show_entries", "stream=codec_type",
-                  "-of", "default=noprint_wrappers=1",
-                  cam.rtsp_url
-                ]
-              : [
-                  "-rtsp_transport", "tcp",
-                  "-v", "error",
-                  "-analyzeduration", "500000",
-                  "-probesize", "500000",
-                  "-show_entries", "stream=codec_type",
-                  "-of", "default=noprint_wrappers=1",
-                  cam.rtsp_url
-                ];
+            const probeArgs = [
+              ...(isRtmp ? [] : ["-rtsp_transport", "tcp", "-stimeout", "3000000"]),
+              "-v", "error",
+              "-analyzeduration", "1500000",
+              "-probesize", "1500000",
+              "-show_entries", "stream=codec_type,codec_name",
+              "-of", "default=noprint_wrappers=1",
+              cam.rtsp_url
+            ];
             
             const proc = spawn("ffprobe", probeArgs);
             activeProbeProc = proc;
@@ -445,37 +441,45 @@ async function startServer() {
               try { proc.kill("SIGKILL"); } catch (e) {}
               if (activeProbeProc === proc) activeProbeProc = null;
               resolve(out.toLowerCase().includes("audio"));
-            }, 1000);
+            }, 2500);
             proc.on("close", () => {
               clearTimeout(timer);
               if (activeProbeProc === proc) activeProbeProc = null;
               resolve(out.toLowerCase().includes("audio"));
             });
+            proc.on("error", () => {
+              clearTimeout(timer);
+              if (activeProbeProc === proc) activeProbeProc = null;
+              resolve(false);
+            });
           });
           camAudioCache[cam.id] = probedAudio;
-          cam.has_audio = probedAudio;
-          saveDb(db);
+          if (probedAudio) {
+            cam.has_audio = true;
+            saveDb(db);
+          }
         }
-        hasAudio = Boolean(probedAudio);
+        hasAudio = Boolean(probedAudio || cam.has_audio);
 
         if (isRtmp) {
           inputArgs.push(
             "-thread_queue_size", "4096",
             "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
             "-fpsprobesize", "0",
-            "-analyzeduration", "500000", 
-            "-probesize", "500000", 
+            "-analyzeduration", "1000000", 
+            "-probesize", "1000000", 
             "-i", cam.rtsp_url
           );
         } else {
           inputArgs.push(
             "-thread_queue_size", "4096",
             "-rtsp_transport", "tcp", 
+            "-stimeout", "5000000",
             "-flags", "+low_delay",
             "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
             "-fpsprobesize", "0",
-            "-analyzeduration", "500000", 
-            "-probesize", "500000", 
+            "-analyzeduration", "1000000", 
+            "-probesize", "1000000", 
             "-i", cam.rtsp_url
           );
         }
@@ -590,23 +594,23 @@ async function startServer() {
       const narrationVolume = Math.max(0, (db.stream_status.mic_narration_volume ?? 100) / 100);
 
       if (type === "web") {
-        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else if (narrationInputIndex !== -1) {
         if (db.stream_status.mic_narration_mode === "mix" && hasAudio) {
           addLog(`[SERVER] ÁUDIO MISTO: Misturando voz do narrador (Ganho: ${Math.round(narrationVolume * 100)}%) com o som original da câmera.\n`);
-          filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[cam_a]`);
-          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
-          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=longest:dropout_transition=2,aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+          filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[cam_a]`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
+          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=longest:dropout_transition=2,aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
         } else {
           addLog(`[SERVER] ÁUDIO NARRAÇÃO: Transmitindo apenas voz do narrador (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
-          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)},aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[a_out]`);
         }
       } else if (hasAudio) {
         addLog("[SERVER] ÁUDIO NATIVO: Transmitindo som ambiente da câmera IP para o YouTube.\n");
-        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else {
         addLog("[SERVER] ÁUDIO SILENCIOSO: Câmera sem microfone embutido. Enviando faixa silenciosa para o YouTube.\n");
-        filterComplexParts.push(`[${silenceInputIndex}:a]aresample=44100:async=1000:min_hard_comp=0.100000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${silenceInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       }
 
       const mappingArgs = ["-map", videoOutLabel, "-map", audioOutLabel];
@@ -692,6 +696,19 @@ async function startServer() {
             }, 500);
             return;
           }
+        }
+
+        // Auto-reconnect if it was a camera and not stopped manually
+        if (!manualStop && type === "camera" && currentDb.stream_status.is_streaming) {
+          addLog(`[SERVER] Reconectando automaticamente à câmera ID ${id} em 2s...\n`);
+          stopStream(true);
+          setTimeout(() => {
+            const freshDb = getDb();
+            if (freshDb.stream_status.is_streaming && freshDb.stream_status.current_source_type === "camera") {
+              startStream("camera", id);
+            }
+          }, 2000);
+          return;
         }
 
         stopStream();
@@ -862,27 +879,24 @@ async function startServer() {
       }
     };
 
-    // If cache is valid, serve immediately!
-    if (cache.data.length > 0 && (now - cache.timestamp < CACHE_TTL)) {
-      return deliverBuffer(cache.data);
+    // If stale cache exists, serve it immediately to client while refreshing in background if expired
+    if (cache.data.length > 0) {
+      deliverBuffer(cache.data);
+      if (now - cache.timestamp < CACHE_TTL || cache.isFetching) {
+        return;
+      }
     }
 
-    // If already fetching, return stale cache immediately if we have it!
-    // This makes the UI feel ultra smooth and responsive.
     if (cache.isFetching) {
-      if (cache.data.length > 0) {
-        return deliverBuffer(cache.data);
-      }
-      // If we don't have stale cache, queue the resolver
       cache.pendingResolvers.push(deliverBuffer);
       return;
     }
 
-    // Capture new snapshot
+    // Capture new snapshot in background
     cache.isFetching = true;
 
     const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
-    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp"];
+    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-stimeout", "3000000"];
 
     const args = [
       "-thread_queue_size", "2048",
@@ -891,10 +905,12 @@ async function startServer() {
       "-probesize", "500000",
       "-analyzeduration", "500000",
       "-i", cam.rtsp_url,
+      "-vf", "scale=480:-1",
       "-frames:v", "1",
       "-an",
       "-f", "image2",
       "-vcodec", "mjpeg",
+      "-q:v", "6",
       "pipe:1"
     ];
 
@@ -902,8 +918,8 @@ async function startServer() {
     const chunks: Buffer[] = [];
 
     const timeout = setTimeout(() => {
-      ffmpeg.kill("SIGKILL");
-    }, 4000);
+      try { ffmpeg.kill("SIGKILL"); } catch (e) {}
+    }, 3500);
 
     ffmpeg.stdout.on("data", (chunk) => {
       chunks.push(chunk);
