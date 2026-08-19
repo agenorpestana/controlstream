@@ -54,30 +54,12 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
   const [error, setError] = useState(false);
   const [imgSrc, setImgSrc] = useState(() => `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}`);
   const imgRef = useRef<HTMLImageElement | null>(null);
-  const consecutiveErrorsRef = useRef(0);
-  const lastActiveTimeRef = useRef(Date.now());
 
-  // Auto-refresh softly every 2 minutes (120,000ms) without creating duplicate sockets
   useEffect(() => {
-    consecutiveErrorsRef.current = 0;
     setError(false);
     setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
 
-    const interval = setInterval(() => {
-      setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
-    }, 120 * 1000);
-
-    const handleVisibilityChange = () => {
-      if (!document.hidden && Date.now() - lastActiveTimeRef.current > 30000) {
-        lastActiveTimeRef.current = Date.now();
-        setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
     return () => {
-      clearInterval(interval);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
       if (imgRef.current) {
         imgRef.current.src = '';
         imgRef.current.removeAttribute('src');
@@ -85,29 +67,13 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
     };
   }, [camId, quality, token]);
 
-  const handleLoad = () => {
-    consecutiveErrorsRef.current = 0;
-    setError(false);
-  };
-
-  const handleError = () => {
-    consecutiveErrorsRef.current += 1;
-    if (consecutiveErrorsRef.current >= 3) {
-      setError(true);
-    }
-    setTimeout(() => {
-      setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&retry=${Date.now()}`);
-    }, 3000);
-  };
-
   return (
     <div className={`relative bg-black/40 overflow-hidden ${className}`}>
       {error && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-black/80 z-20">
+        <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-black/80 z-10">
           <p className="text-red-400 text-[10px] font-bold uppercase mb-2">Aguardando Câmera...</p>
           <button 
             onClick={() => {
-              consecutiveErrorsRef.current = 0;
               setError(false);
               setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
             }}
@@ -117,14 +83,18 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
           </button>
         </div>
       )}
-
       <img 
         ref={imgRef}
         src={imgSrc} 
         alt={`Camera ${camId}`}
         className="w-full h-full object-contain"
-        onLoad={handleLoad}
-        onError={handleError}
+        onError={() => {
+          setError(true);
+          setTimeout(() => {
+            setError(false);
+            setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&retry=${Date.now()}`);
+          }, 3000);
+        }}
       />
     </div>
   );
@@ -1189,8 +1159,6 @@ export default function App() {
 
   const handleToggleBlockOffline = async (enabled: boolean) => {
     const token = localStorage.getItem('token');
-    // Optimistic UI update
-    setStatus(prev => prev ? { ...prev, block_offline_switch: enabled } : prev);
     try {
       const res = await fetch('/api/status/block-offline', {
         method: 'POST',
@@ -1200,8 +1168,8 @@ export default function App() {
         },
         body: JSON.stringify({ block_offline_switch: enabled })
       });
-      const data = await res.json().catch(() => null);
-      if (res.ok && data?.status) {
+      const data = await res.json();
+      if (res.ok && data.status) {
         setStatus(data.status);
       }
     } catch (err) {

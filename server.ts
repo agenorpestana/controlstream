@@ -976,196 +976,98 @@ async function startServer() {
     });
   });
 
-  // Scalable Multi-Instance MJPEG Broadcaster & Hub
-  class CameraMjpegBroadcaster {
-    public camId: number;
-    public quality: "preview" | "high";
-    private subscribers: Map<string, any> = new Map();
-    private ffProcess: ChildProcess | null = null;
-    private stopTimer: NodeJS.Timeout | null = null;
-    private restartTimer: NodeJS.Timeout | null = null;
-    private lastChunk: Buffer | null = null;
-    private isDestroyed: boolean = false;
-
-    constructor(camId: number, quality: "preview" | "high") {
-      this.camId = camId;
-      this.quality = quality;
-    }
-
-    public addClient(clientId: string, res: any, req: any) {
-      if (this.isDestroyed) return;
-
-      if (this.stopTimer) {
-        clearTimeout(this.stopTimer);
-        this.stopTimer = null;
-      }
-
-      res.writeHead(200, {
-        "Content-Type": "multipart/x-mixed-replace; boundary=ffmpeg",
-        "Cache-Control": "no-cache, no-store, must-revalidate",
-        "Connection": "close",
-        "Pragma": "no-cache",
-        "X-Accel-Buffering": "no"
-      });
-
-      this.subscribers.set(clientId, res);
-
-      if (this.lastChunk && this.lastChunk.length > 0) {
-        try {
-          res.write(this.lastChunk);
-        } catch (e) {}
-      }
-
-      if (!this.ffProcess) {
-        this.startProcess();
-      }
-
-      const cleanup = () => {
-        this.subscribers.delete(clientId);
-        try {
-          if (!res.writableEnded) res.end();
-        } catch (e) {}
-
-        if (this.subscribers.size === 0) {
-          if (!this.stopTimer) {
-            this.stopTimer = setTimeout(() => {
-              if (this.subscribers.size === 0) {
-                this.stopProcess();
-              }
-            }, 8000);
-          }
-        }
-      };
-
-      req.on("close", cleanup);
-      req.on("aborted", cleanup);
-      req.on("end", cleanup);
-      req.on("error", cleanup);
-      res.on("close", cleanup);
-      res.on("finish", cleanup);
-      res.on("error", cleanup);
-      if (req.socket) {
-        req.socket.on("close", cleanup);
-        req.socket.on("error", cleanup);
-      }
-    }
-
-    private startProcess() {
-      if (this.isDestroyed || this.ffProcess) return;
-
-      const db = getDb();
-      const cam = db.cameras.find((c: any) => c.id === this.camId);
-      if (!cam || !cam.rtsp_url) {
-        return;
-      }
-
-      const isPreview = this.quality === "preview";
-      const scaleFilter = isPreview ? "scale=480:-1" : "scale=960:-1";
-      const fpsRate = isPreview ? "15" : "30";
-      const qualityVal = isPreview ? "8" : "4";
-
-      const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
-      const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-flags", "+low_delay"];
-
-      const args = [
-        "-thread_queue_size", "4096",
-        "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
-        "-fpsprobesize", "0",
-        ...transportOpts,
-        "-probesize", "500000",
-        "-analyzeduration", "500000",
-        "-i", cam.rtsp_url,
-        "-r", fpsRate,
-        "-vf", scaleFilter,
-        "-an",
-        "-c:v", "mjpeg",
-        "-q:v", qualityVal,
-        "-g", "15",
-        "-f", "mpjpeg",
-        "-boundary_tag", "ffmpeg",
-        "-"
-      ];
-
-      const ff = spawn("ffmpeg", args);
-      this.ffProcess = ff;
-
-      ff.stdout.on("data", (chunk: Buffer) => {
-        this.lastChunk = chunk;
-        for (const [id, res] of this.subscribers.entries()) {
-          try {
-            if (!res.writableEnded) {
-              res.write(chunk);
-            } else {
-              this.subscribers.delete(id);
-            }
-          } catch (e) {
-            this.subscribers.delete(id);
-          }
-        }
-      });
-
-      ff.on("error", (err) => {
-        console.error(`[MJPEG-HUB] Erro FFmpeg cam ${this.camId} (${this.quality}):`, err.message);
-      });
-
-      ff.on("close", () => {
-        this.ffProcess = null;
-        if (this.subscribers.size > 0 && !this.isDestroyed) {
-          if (this.restartTimer) clearTimeout(this.restartTimer);
-          this.restartTimer = setTimeout(() => {
-            if (this.subscribers.size > 0 && !this.isDestroyed) {
-              this.startProcess();
-            }
-          }, 1500);
-        }
-      });
-    }
-
-    private stopProcess() {
-      if (this.restartTimer) {
-        clearTimeout(this.restartTimer);
-        this.restartTimer = null;
-      }
-      if (this.ffProcess) {
-        try {
-          this.ffProcess.stdout.removeAllListeners();
-          this.ffProcess.kill("SIGKILL");
-        } catch (e) {}
-        this.ffProcess = null;
-      }
-    }
-  }
-
-  class CameraMjpegHub {
-    private broadcasters: Map<string, CameraMjpegBroadcaster> = new Map();
-
-    private getKey(camId: number, quality: "preview" | "high"): string {
-      return `${camId}:${quality}`;
-    }
-
-    public handleRequest(camId: number, quality: "preview" | "high", req: any, res: any) {
-      const key = this.getKey(camId, quality);
-      let broadcaster = this.broadcasters.get(key);
-      if (!broadcaster) {
-        broadcaster = new CameraMjpegBroadcaster(camId, quality);
-        this.broadcasters.set(key, broadcaster);
-      }
-
-      const clientId = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-      broadcaster.addClient(clientId, res, req);
-    }
-  }
-
-  const cameraMjpegHub = new CameraMjpegHub();
-
   app.get("/api/cameras/:id/mjpeg", authenticate, (req, res) => {
     const db = getDb();
     const camId = parseInt(req.params.id);
     const cam = db.cameras.find((c: any) => c.id === camId);
     if (!cam) return res.status(404).json({ error: "Câmera não encontrada" });
 
-    const quality = req.query.quality === "high" ? "high" : "preview";
-    cameraMjpegHub.handleRequest(camId, quality, req, res);
+    const isPreview = req.query.quality === "preview";
+
+    // Terminate old active high-quality stream ONLY if switching to a DIFFERENT camera ID
+    if (!isPreview && activeHighQualityMjpegProc && activeHighQualityCamId !== camId) {
+      try { activeHighQualityMjpegProc.kill("SIGKILL"); } catch (e) {}
+      activeHighQualityMjpegProc = null;
+      activeHighQualityCamId = null;
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "multipart/x-mixed-replace; boundary=ffmpeg",
+      "Cache-Control": "no-cache, no-store, must-revalidate",
+      "Connection": "close",
+      "Pragma": "no-cache",
+      "X-Accel-Buffering": "no"
+    });
+
+    const scaleFilter = isPreview ? "scale=480:-1" : "scale=960:-1";
+    const fpsRate = isPreview ? "15" : "30";
+    const qualityVal = isPreview ? "8" : "4";
+
+    const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
+    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-flags", "+low_delay"];
+
+    const args = [
+      "-thread_queue_size", "4096",
+      "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
+      "-fpsprobesize", "0",
+      ...transportOpts,
+      "-probesize", "500000",
+      "-analyzeduration", "500000",
+      "-i", cam.rtsp_url,
+      "-r", fpsRate,
+      "-vf", scaleFilter,
+      "-an",
+      "-c:v", "mjpeg",
+      "-q:v", qualityVal,
+      "-g", "15",
+      "-f", "mpjpeg",
+      "-boundary_tag", "ffmpeg",
+      "-"
+    ];
+
+    const ff = spawn("ffmpeg", args);
+    if (!isPreview) {
+      activeHighQualityMjpegProc = ff;
+      activeHighQualityCamId = camId;
+    }
+
+    ff.stdout.pipe(res);
+
+    let killed = false;
+    const cleanup = () => {
+      if (killed) return;
+      killed = true;
+      if (activeHighQualityMjpegProc === ff) {
+        activeHighQualityMjpegProc = null;
+        activeHighQualityCamId = null;
+      }
+      try {
+        ff.stdout.unpipe(res);
+        ff.kill("SIGKILL");
+      } catch (e) {}
+      try {
+        if (!res.writableEnded) res.end();
+      } catch (e) {}
+    };
+
+    req.on("close", cleanup);
+    req.on("aborted", cleanup);
+    req.on("end", cleanup);
+    req.on("error", cleanup);
+    res.on("close", cleanup);
+    res.on("finish", cleanup);
+    res.on("error", cleanup);
+    if (req.socket) {
+      req.socket.on("close", cleanup);
+      req.socket.on("error", cleanup);
+    }
+    ff.on("close", () => {
+      killed = true;
+      if (activeHighQualityMjpegProc === ff) {
+        activeHighQualityMjpegProc = null;
+        activeHighQualityCamId = null;
+      }
+    });
   });
 
   // Dedicated Camera Audio Monitoring Endpoint for Local Audio Return / Fones
