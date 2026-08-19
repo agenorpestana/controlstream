@@ -52,14 +52,51 @@ interface StreamStatus {
 const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
   const [error, setError] = useState(false);
-  const [imgSrc, setImgSrc] = useState(() => `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}`);
+  const [imgSrc, setImgSrc] = useState<string>(() => `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}`);
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const isMountedRef = useRef(true);
 
-  useEffect(() => {
+  const reloadStream = () => {
+    if (!isMountedRef.current) return;
     setError(false);
     setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
+  };
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    reloadStream();
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        // Tab was returned to; reconnect MJPEG stream immediately to avoid frozen frames
+        reloadStream();
+      } else {
+        // Tab backgrounded; clear src to prevent memory buffer congestion
+        if (imgRef.current) {
+          imgRef.current.src = '';
+        }
+      }
+    };
+
+    const handleWindowFocus = () => {
+      reloadStream();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleWindowFocus);
+
+    // Watchdog: smoothly refresh connection every 45s while tab is visible to prevent silent TCP stalls
+    const watchdogInterval = setInterval(() => {
+      if (document.visibilityState === 'visible' && !error) {
+        reloadStream();
+      }
+    }, 45000);
 
     return () => {
+      isMountedRef.current = false;
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleWindowFocus);
+      clearInterval(watchdogInterval);
       if (imgRef.current) {
         imgRef.current.src = '';
         imgRef.current.removeAttribute('src');
@@ -73,11 +110,9 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
         <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-black/80 z-10">
           <p className="text-red-400 text-[10px] font-bold uppercase mb-2">Aguardando Câmera...</p>
           <button 
-            onClick={() => {
-              setError(false);
-              setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
-            }}
+            onClick={reloadStream}
             className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors cursor-pointer"
+            title="Recarregar Câmera"
           >
             <RefreshCw className="w-4 h-4 text-white animate-spin" />
           </button>
@@ -89,10 +124,12 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
         alt={`Camera ${camId}`}
         className="w-full h-full object-contain"
         onError={() => {
+          if (!isMountedRef.current) return;
           setError(true);
           setTimeout(() => {
-            setError(false);
-            setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&retry=${Date.now()}`);
+            if (isMountedRef.current && document.visibilityState === 'visible') {
+              reloadStream();
+            }
           }, 3000);
         }}
       />
@@ -864,7 +901,29 @@ export default function App() {
         setTimeout(() => startActualRecorder(), 100);
       });
 
+      const handleGlobalVisibility = () => {
+        if (document.visibilityState === 'visible') {
+          fetchData();
+          if (socket.disconnected) {
+            socket.connect();
+          }
+          setIsSwitching(false);
+        }
+      };
+
+      const handleGlobalFocus = () => {
+        fetchData();
+        if (socket.disconnected) {
+          socket.connect();
+        }
+      };
+
+      document.addEventListener('visibilitychange', handleGlobalVisibility);
+      window.addEventListener('focus', handleGlobalFocus);
+
       return () => {
+        document.removeEventListener('visibilitychange', handleGlobalVisibility);
+        window.removeEventListener('focus', handleGlobalFocus);
         socket.disconnect();
         if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
       };
@@ -1214,16 +1273,25 @@ export default function App() {
   const [isSwitching, setIsSwitching] = useState(false);
   const [offlineAlert, setOfflineAlert] = useState<string | null>(null);
 
+  const switchAbortControllerRef = useRef<AbortController | null>(null);
+
   const switchStream = async (type: 'camera' | 'video' | 'web', id: number | string) => {
-    if (isSwitching) return;
+    // If a previous switch is in progress, cancel it cleanly so the user can switch to another source immediately
+    if (switchAbortControllerRef.current) {
+      try { switchAbortControllerRef.current.abort(); } catch (e) {}
+      switchAbortControllerRef.current = null;
+    }
+
     setIsSwitching(true);
     setOfflineAlert(null);
     const token = localStorage.getItem('token');
     setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] Solicitando troca de stream para: ${type} (${id})...\n`]);
 
+    const controller = new AbortController();
+    switchAbortControllerRef.current = controller;
+
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000);
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
 
       const response = await fetch('/api/stream/switch', {
         method: 'POST',
@@ -1267,17 +1335,24 @@ export default function App() {
         }, 2500);
       }
     } catch (error: any) {
+      if (error.name === 'AbortError' && switchAbortControllerRef.current !== controller) {
+        // Cancelled because user clicked another camera - ignore
+        return;
+      }
       const msg = error.name === 'AbortError' 
-        ? 'A câmera demorou muito para responder e parece estar offline. A transmissão não foi alterada.' 
+        ? 'A câmera demorou para responder. Tente novamente ou verifique se o sinal RTSP está ativo.' 
         : `Erro ao conectar: ${error.message}`;
       setOfflineAlert(msg);
       setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] ERRO NA TROCA DE STREAM: ${msg}\n`]);
       setTimeout(() => setOfflineAlert(null), 8000);
     } finally {
+      if (switchAbortControllerRef.current === controller) {
+        switchAbortControllerRef.current = null;
+      }
       setTimeout(() => {
         fetchData();
         setIsSwitching(false);
-      }, 1000);
+      }, 500);
     }
   };
 

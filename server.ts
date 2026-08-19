@@ -1004,7 +1004,9 @@ async function startServer() {
     const qualityVal = isPreview ? "8" : "4";
 
     const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
-    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-flags", "+low_delay"];
+    const transportOpts = isRtmp 
+      ? ["-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"] 
+      : ["-rtsp_transport", "tcp", "-stimeout", "3000000", "-flags", "+low_delay", "-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"];
 
     const args = [
       "-thread_queue_size", "4096",
@@ -1489,18 +1491,27 @@ async function startServer() {
   const checkCameraOnline = (rtspUrl: string, camId?: number): Promise<boolean> => {
     if (!rtspUrl) return Promise.resolve(false);
     
-    // Se o snapshot desta câmera estiver em cache e recente (< 6s), a câmera está online com certeza!
-    if (camId && snapshotCaches[camId] && snapshotCaches[camId].data.length > 0 && (Date.now() - snapshotCaches[camId].timestamp < 6000)) {
+    const db = getDb();
+    // Se esta câmera for a que está ativa na transmissão, ela está online com certeza!
+    if (db.stream_status.is_streaming && db.stream_status.current_source_type === "camera" && db.stream_status.current_source_id === camId) {
+      return Promise.resolve(true);
+    }
+
+    // Se a câmera estiver com preview ativo ou snapshot recente (< 15s)
+    if (camId && activeHighQualityCamId === camId) {
+      return Promise.resolve(true);
+    }
+    if (camId && snapshotCaches[camId] && snapshotCaches[camId].data.length > 0 && (Date.now() - snapshotCaches[camId].timestamp < 15000)) {
       return Promise.resolve(true);
     }
 
     const isRtmp = rtspUrl.startsWith("rtmp://") || rtspUrl.startsWith("rtmps://");
-    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp"];
+    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-stimeout", "2500000"];
     const probeArgs = [
       ...transportOpts,
       "-v", "error",
-      "-analyzeduration", "1000000",
-      "-probesize", "1000000",
+      "-analyzeduration", "500000",
+      "-probesize", "500000",
       "-show_entries", "stream=codec_type",
       "-of", "default=noprint_wrappers=1",
       rtspUrl
@@ -1517,15 +1528,17 @@ async function startServer() {
 
       const timer = setTimeout(() => {
         try { proc.kill("SIGKILL"); } catch (e) {}
-        resolve(out.toLowerCase().includes("video") || out.toLowerCase().includes("audio"));
-      }, 3500);
+        const ok = out.toLowerCase().includes("video") || out.toLowerCase().includes("audio");
+        resolve(ok);
+      }, 3000);
 
       if (proc.stdout) {
         proc.stdout.on("data", (d: any) => { out += d.toString(); });
       }
-      proc.on("close", () => {
+      proc.on("close", (code: number) => {
         clearTimeout(timer);
-        resolve(out.toLowerCase().includes("video") || out.toLowerCase().includes("audio"));
+        const ok = (code === 0) || out.toLowerCase().includes("video") || out.toLowerCase().includes("audio");
+        resolve(ok);
       });
       proc.on("error", () => {
         clearTimeout(timer);
