@@ -417,14 +417,15 @@ export const getDb = (): AppDatabase => {
 
 export const writeSportsFiles = (status: any) => {
   try {
-    fs.writeFileSync("./teama.txt", (status.team_a_name || "TIME A").toUpperCase());
-    fs.writeFileSync("./teamb.txt", (status.team_b_name || "TIME B").toUpperCase());
-    fs.writeFileSync("./scorea.txt", String(status.score_a ?? 0));
-    fs.writeFileSync("./scoreb.txt", String(status.score_b ?? 0));
-    const mins = Math.floor((status.timer_seconds || 0) / 60);
-    const secs = (status.timer_seconds || 0) % 60;
+    const cwd = process.cwd();
+    fs.writeFileSync(path.resolve(cwd, "teama.txt"), (status?.team_a_name || "TIME A").toUpperCase());
+    fs.writeFileSync(path.resolve(cwd, "teamb.txt"), (status?.team_b_name || "TIME B").toUpperCase());
+    fs.writeFileSync(path.resolve(cwd, "scorea.txt"), String(status?.score_a ?? 0));
+    fs.writeFileSync(path.resolve(cwd, "scoreb.txt"), String(status?.score_b ?? 0));
+    const mins = Math.floor((status?.timer_seconds || 0) / 60);
+    const secs = (status?.timer_seconds || 0) % 60;
     const timeStr = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-    fs.writeFileSync("./timer.txt", timeStr);
+    fs.writeFileSync(path.resolve(cwd, "timer.txt"), timeStr);
   } catch (err) {
     console.error("Erro ao gravar arquivos do painel esportivo:", err);
   }

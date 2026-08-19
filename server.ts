@@ -61,20 +61,57 @@ if (process.env.DISABLE_RTMP_SERVER !== "true") {
   console.log("Servidor RTMP interno desativado via DISABLE_RTMP_SERVER=true");
 }
 
-// Font downloader for sports scoreboard overlay in FFmpeg
-const fontPath = path.join(process.cwd(), "sportsfont.ttf");
-if (!fs.existsSync(fontPath)) {
-  console.log("Baixando fonte TTF para o overlay do painel...");
-  const fontFile = fs.createWriteStream(fontPath);
+// Font downloader & system font locator for sports scoreboard overlay in FFmpeg
+const customFontPath = path.join(process.cwd(), "sportsfont.ttf");
+
+function getAvailableFontFile(): string | null {
+  if (fs.existsSync(customFontPath)) {
+    try {
+      if (fs.statSync(customFontPath).size > 1000) return customFontPath;
+    } catch (e) {}
+  }
+
+  const systemFonts = [
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/segoeui.ttf",
+    "/System/Library/Fonts/Helvetica.ttc"
+  ];
+
+  for (const f of systemFonts) {
+    try {
+      if (fs.existsSync(f) && fs.statSync(f).size > 1000) {
+        if (!fs.existsSync(customFontPath)) {
+          try { fs.copyFileSync(f, customFontPath); } catch (e) {}
+        }
+        return f;
+      }
+    } catch (e) {}
+  }
+  return null;
+}
+
+// Ensure font is available or downloaded
+if (!getAvailableFontFile()) {
+  console.log("Tentando baixar fonte TTF para o overlay do painel...");
+  const fontFile = fs.createWriteStream(customFontPath);
   https.get("https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/resources/ttf/DejaVuSans-Bold.ttf", (response) => {
     response.pipe(fontFile);
     fontFile.on("finish", () => {
       fontFile.close();
       try {
-        const stats = fs.statSync(fontPath);
+        const stats = fs.statSync(customFontPath);
         if (stats.size < 1000) {
           console.error("Fonte baixada é muito pequena ou inválida, removendo...");
-          fs.unlinkSync(fontPath);
+          fs.unlinkSync(customFontPath);
         } else {
           console.log("Fonte TTF baixada e salva com sucesso.");
         }
@@ -83,37 +120,43 @@ if (!fs.existsSync(fontPath)) {
       }
     });
   }).on("error", (err) => {
-    console.error("Erro ao baixar fonte TTF:", err.message);
-    try { fontFile.close(); fs.unlinkSync(fontPath); } catch (ex) {}
+    console.error("Aviso ao baixar fonte TTF:", err.message);
+    try { fontFile.close(); fs.unlinkSync(customFontPath); } catch (ex) {}
   });
-} else {
-  try {
-    const stats = fs.statSync(fontPath);
-    if (stats.size < 1000) {
-      console.log("Removendo arquivo de fonte inválido ou corrompido...");
-      fs.unlinkSync(fontPath);
-    }
-  } catch (e) {}
 }
 
-// Narration Audio Streamer (PCM 16-bit 44.1kHz Stereo)
+// Narration Audio Streamer (PCM 16-bit 44.1kHz Stereo) with Circular Buffer for Zero Dropouts
 class NarrationAudioStreamer {
   private clients: ((chunk: Buffer) => void)[] = [];
   private lastChunkTime: number = 0;
+  private ringBuffer: Buffer[] = [];
+  private totalRingBytes: number = 0;
+  private maxRingBytes: number = 35280; // ~200ms of 44.1kHz 16-bit stereo PCM audio
 
   constructor() {
     // Generate constant 44.1kHz stereo silence ticks (every 40ms = ~3528 bytes) if no mic chunk arrived
     // This guarantees FFmpeg's audio pipe never stutters, blocks, or falls out of sync
     setInterval(() => {
-      if (Date.now() - this.lastChunkTime > 100 && this.clients.length > 0) {
+      if (Date.now() - this.lastChunkTime > 80 && this.clients.length > 0) {
         const silenceChunk = Buffer.alloc(3528, 0);
-        this.broadcast(silenceChunk);
+        this.pushChunk(silenceChunk, true);
       }
     }, 40);
   }
 
-  public pushChunk(buf: Buffer) {
-    this.lastChunkTime = Date.now();
+  public pushChunk(buf: Buffer, isSilence = false) {
+    if (!isSilence) {
+      this.lastChunkTime = Date.now();
+    }
+    
+    // Store in circular buffer
+    this.ringBuffer.push(buf);
+    this.totalRingBytes += buf.length;
+    while (this.totalRingBytes > this.maxRingBytes && this.ringBuffer.length > 1) {
+      const removed = this.ringBuffer.shift();
+      if (removed) this.totalRingBytes -= removed.length;
+    }
+
     this.broadcast(buf);
   }
 
@@ -128,6 +171,18 @@ class NarrationAudioStreamer {
   }
 
   public subscribe(cb: (chunk: Buffer) => void) {
+    // When a newly spawned FFmpeg process connects during a camera switch,
+    // immediately prime it with recent audio so there is zero gap or silence stutter
+    if (this.ringBuffer.length > 0) {
+      for (const chunk of this.ringBuffer) {
+        try {
+          cb(chunk);
+        } catch (e) {}
+      }
+    } else {
+      cb(Buffer.alloc(7056, 0));
+    }
+
     this.clients.push(cb);
     return () => {
       const idx = this.clients.indexOf(cb);
@@ -485,24 +540,33 @@ async function startServer() {
 
       if ((type === "camera" || type === "video") && (db.stream_status.scoreboard_enabled || db.stream_status.timer_enabled)) {
         writeSportsFiles(db.stream_status);
-        const escFontPath = fontPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-        const fontFileOpt = fs.existsSync(fontPath) && fs.statSync(fontPath).size > 1000 ? `:fontfile='${escFontPath}'` : "";
+        const resolvedFont = getAvailableFontFile();
+        const escFFmpeg = (p: string) => p.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
+        const fontFileOpt = resolvedFont ? `:fontfile='${escFFmpeg(resolvedFont)}'` : "";
+
+        const cwd = process.cwd();
+        const teamAFile = escFFmpeg(path.resolve(cwd, "teama.txt"));
+        const scoreAFile = escFFmpeg(path.resolve(cwd, "scorea.txt"));
+        const scoreBFile = escFFmpeg(path.resolve(cwd, "scoreb.txt"));
+        const teamBFile = escFFmpeg(path.resolve(cwd, "teamb.txt"));
+        const timerFile = escFFmpeg(path.resolve(cwd, "timer.txt"));
+
         if (db.stream_status.scoreboard_enabled) {
           videoFilters.push("drawbox=x=40:y=40:w=320:h=42:color=black@0.85:t=fill");
           videoFilters.push("drawbox=x=40:y=40:w=4:h=42:color=0xEAB308:t=fill");
-          videoFilters.push(`drawtext=textfile=teama.txt:reload=1:x=75:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
-          videoFilters.push(`drawtext=textfile=scorea.txt:reload=1:x=160:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
+          videoFilters.push(`drawtext=textfile='${teamAFile}':reload=1:x=75:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
+          videoFilters.push(`drawtext=textfile='${scoreAFile}':reload=1:x=160:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
           videoFilters.push(`drawtext=text='-':x=198:y=52:fontcolor=white@0.4:fontsize=16${fontFileOpt}`);
-          videoFilters.push(`drawtext=textfile=scoreb.txt:reload=1:x=224:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
-          videoFilters.push(`drawtext=textfile=teamb.txt:reload=1:x=265:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
+          videoFilters.push(`drawtext=textfile='${scoreBFile}':reload=1:x=224:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
+          videoFilters.push(`drawtext=textfile='${teamBFile}':reload=1:x=265:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
         }
         if (db.stream_status.timer_enabled) {
           if (db.stream_status.scoreboard_enabled) {
             videoFilters.push("drawbox=x=366:y=40:w=80:h=42:color=0xEAB308:t=fill");
-            videoFilters.push(`drawtext=textfile=timer.txt:reload=1:x=384:y=52:fontcolor=black:fontsize=16${fontFileOpt}`);
+            videoFilters.push(`drawtext=textfile='${timerFile}':reload=1:x=384:y=52:fontcolor=black:fontsize=16${fontFileOpt}`);
           } else {
             videoFilters.push("drawbox=x=40:y=40:w=90:h=42:color=0xEAB308:t=fill");
-            videoFilters.push(`drawtext=textfile=timer.txt:reload=1:x=63:y=52:fontcolor=black:fontsize=17${fontFileOpt}`);
+            videoFilters.push(`drawtext=textfile='${timerFile}':reload=1:x=63:y=52:fontcolor=black:fontsize=17${fontFileOpt}`);
           }
         }
       }

@@ -459,9 +459,18 @@ export default function App() {
     };
   }, [screenStream, cameraStream]);
 
+  const narrationGainNodeRef = useRef<GainNode | null>(null);
+
+  // Dynamic volume adjustment without stopping/restarting audio context or media stream!
+  useEffect(() => {
+    if (narrationGainNodeRef.current && status?.mic_narration_volume !== undefined) {
+      narrationGainNodeRef.current.gain.value = (status.mic_narration_volume ?? 100) / 100;
+    }
+  }, [status?.mic_narration_volume]);
+
   // Live Narration Web Audio Streamer -> Socket.io PCM 16-bit 44.1kHz Stereo
   useEffect(() => {
-    const isEnabled = status?.mic_narration_enabled;
+    const isEnabled = Boolean(status?.mic_narration_enabled);
     if (!isEnabled) {
       if (narrationMediaStreamRef.current) {
         narrationMediaStreamRef.current.getTracks().forEach(t => t.stop());
@@ -471,6 +480,7 @@ export default function App() {
         try { narrationAudioCtxRef.current.close(); } catch (e) {}
         narrationAudioCtxRef.current = null;
       }
+      narrationGainNodeRef.current = null;
       setMicAudioLevel(0);
       return;
     }
@@ -507,6 +517,7 @@ export default function App() {
         const gainNode = audioCtx.createGain();
         const volumeFactor = ((status?.mic_narration_volume ?? 100) / 100);
         gainNode.gain.value = volumeFactor;
+        narrationGainNodeRef.current = gainNode;
 
         // ScriptProcessor with 2048 samples (~46ms buffer at 44.1kHz)
         const processor = audioCtx.createScriptProcessor(2048, 2, 2);
@@ -568,9 +579,10 @@ export default function App() {
         try { narrationAudioCtxRef.current.close(); } catch (e) {}
         narrationAudioCtxRef.current = null;
       }
+      narrationGainNodeRef.current = null;
       setMicAudioLevel(0);
     };
-  }, [status?.mic_narration_enabled, selectedAudioDeviceId]);
+  }, [Boolean(status?.mic_narration_enabled), selectedAudioDeviceId]);
 
   const handleToggleNarration = async (enabled: boolean, mode?: 'replace' | 'mix', volume?: number) => {
     const token = localStorage.getItem('token');
