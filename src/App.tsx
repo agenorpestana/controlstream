@@ -52,48 +52,18 @@ interface StreamStatus {
 const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
   const [error, setError] = useState(false);
-  const [imgSrc, setImgSrc] = useState<string>('');
-  const [isLoaded, setIsLoaded] = useState(false);
-  const isMountedRef = useRef(true);
+  const [imgSrc, setImgSrc] = useState(() => `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}`);
+  const imgRef = useRef<HTMLImageElement | null>(null);
 
   useEffect(() => {
-    isMountedRef.current = true;
     setError(false);
-
-    if (quality === 'high') {
-      setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=high&_t=${Date.now()}`);
-      return () => {
-        isMountedRef.current = false;
-      };
-    }
-
-    // Use non-blocking snapshot polling double-buffering for preview cards to keep browser HTTP sockets 100% free
-    let isFetching = false;
-    const fetchFrame = () => {
-      if (!isMountedRef.current || isFetching) return;
-      isFetching = true;
-      const img = new Image();
-      const url = `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`;
-      img.src = url;
-      img.onload = () => {
-        if (!isMountedRef.current) return;
-        setImgSrc(url);
-        setIsLoaded(true);
-        setError(false);
-        isFetching = false;
-      };
-      img.onerror = () => {
-        if (!isMountedRef.current) return;
-        isFetching = false;
-      };
-    };
-
-    fetchFrame();
-    const interval = setInterval(fetchFrame, 1500);
+    setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
 
     return () => {
-      isMountedRef.current = false;
-      clearInterval(interval);
+      if (imgRef.current) {
+        imgRef.current.src = '';
+        imgRef.current.removeAttribute('src');
+      }
     };
   }, [camId, quality, token]);
 
@@ -105,7 +75,7 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
           <button 
             onClick={() => {
               setError(false);
-              setImgSrc(`/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
+              setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
             }}
             className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors cursor-pointer"
           >
@@ -113,28 +83,19 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
           </button>
         </div>
       )}
-      {imgSrc ? (
-        <img 
-          src={imgSrc} 
-          alt={`Camera ${camId}`}
-          className={`w-full h-full object-contain transition-opacity duration-200 ${isLoaded || quality === 'high' ? 'opacity-100' : 'opacity-80'}`}
-          onError={() => {
-            if (quality === 'high') {
-              setError(true);
-              setTimeout(() => {
-                if (isMountedRef.current) {
-                  setError(false);
-                  setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=high&retry=${Date.now()}`);
-                }
-              }, 3000);
-            }
-          }}
-        />
-      ) : (
-        <div className="w-full h-full flex items-center justify-center bg-black/40">
-          <RefreshCw className="w-4 h-4 text-white/20 animate-spin" />
-        </div>
-      )}
+      <img 
+        ref={imgRef}
+        src={imgSrc} 
+        alt={`Camera ${camId}`}
+        className="w-full h-full object-contain"
+        onError={() => {
+          setError(true);
+          setTimeout(() => {
+            setError(false);
+            setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&retry=${Date.now()}`);
+          }, 3000);
+        }}
+      />
     </div>
   );
 };

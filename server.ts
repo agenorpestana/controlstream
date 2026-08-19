@@ -125,81 +125,39 @@ if (!getAvailableFontFile()) {
   });
 }
 
-// Narration Audio Streamer (Paced Real-Time PCM 16-bit 44.1kHz Stereo)
-// Guaranteed Zero Slow-Motion, Zero Robotic Voice, and Constant Real-Time Output Clock
+// Narration Audio Streamer (PCM 16-bit 44.1kHz Stereo) with Clean Streaming for Zero Robotic Artifacts
 class NarrationAudioStreamer {
   private clients: ((chunk: Buffer) => void)[] = [];
-  private pcmQueue: Buffer[] = [];
-  private queuedBytes: number = 0;
-  private timer: NodeJS.Timeout | null = null;
-  private readonly BYTES_PER_SECOND = 44100 * 2 * 2; // 176,400 bytes/sec
-  private readonly TICK_MS = 25; // 25ms tick rate
-  private readonly BYTES_PER_TICK = Math.round((44100 * 2 * 2 * 25) / 1000); // 4410 bytes per tick
+  private lastChunkTime: number = 0;
+  private ringBuffer: Buffer[] = [];
+  private totalRingBytes: number = 0;
+  private maxRingBytes: number = 35280; // ~200ms of 44.1kHz 16-bit stereo PCM audio
 
   constructor() {
-    this.timer = setInterval(() => {
-      this.tick();
-    }, this.TICK_MS);
+    // Generate silence ONLY if no client chunks have arrived for > 350ms (mic muted or disconnected)
+    // This completely prevents interleaving silence between real voice chunks which was causing robotic sound!
+    setInterval(() => {
+      if (this.clients.length > 0 && Date.now() - this.lastChunkTime > 350) {
+        const silenceChunk = Buffer.alloc(3528, 0); // ~40ms silence
+        this.broadcast(silenceChunk);
+      }
+    }, 40);
   }
 
-  public pushChunk(buf: Buffer) {
-    if (!buf || buf.length === 0) return;
-    this.pcmQueue.push(buf);
-    this.queuedBytes += buf.length;
-
-    // Keep buffer tight (max 350ms in queue) to prevent latency build-up while smoothing jitter
-    const MAX_QUEUE_BYTES = Math.round(this.BYTES_PER_SECOND * 0.35);
-    while (this.queuedBytes > MAX_QUEUE_BYTES && this.pcmQueue.length > 1) {
-      const dropped = this.pcmQueue.shift();
-      if (dropped) this.queuedBytes -= dropped.length;
+  public pushChunk(buf: Buffer, isSilence = false) {
+    if (!isSilence) {
+      this.lastChunkTime = Date.now();
     }
-  }
-
-  private tick() {
-    if (this.clients.length === 0) {
-      if (this.queuedBytes > 10000) {
-        this.pcmQueue = [];
-        this.queuedBytes = 0;
-      }
-      return;
+    
+    // Store in circular buffer for instant priming on camera switch
+    this.ringBuffer.push(buf);
+    this.totalRingBytes += buf.length;
+    while (this.totalRingBytes > this.maxRingBytes && this.ringBuffer.length > 1) {
+      const removed = this.ringBuffer.shift();
+      if (removed) this.totalRingBytes -= removed.length;
     }
 
-    const needed = this.BYTES_PER_TICK;
-    let chunkToSend: Buffer;
-
-    if (this.queuedBytes >= needed) {
-      const chunks: Buffer[] = [];
-      let collected = 0;
-
-      while (this.pcmQueue.length > 0 && collected < needed) {
-        const top = this.pcmQueue[0];
-        const remaining = needed - collected;
-
-        if (top.length <= remaining) {
-          chunks.push(top);
-          collected += top.length;
-          this.pcmQueue.shift();
-          this.queuedBytes -= top.length;
-        } else {
-          chunks.push(top.subarray(0, remaining));
-          this.pcmQueue[0] = top.subarray(remaining);
-          this.queuedBytes -= remaining;
-          collected += remaining;
-        }
-      }
-      chunkToSend = Buffer.concat(chunks);
-    } else if (this.queuedBytes > 0) {
-      const chunks: Buffer[] = [...this.pcmQueue];
-      const silenceNeeded = needed - this.queuedBytes;
-      chunks.push(Buffer.alloc(silenceNeeded, 0));
-      chunkToSend = Buffer.concat(chunks);
-      this.pcmQueue = [];
-      this.queuedBytes = 0;
-    } else {
-      chunkToSend = Buffer.alloc(needed, 0);
-    }
-
-    this.broadcast(chunkToSend);
+    this.broadcast(buf);
   }
 
   private broadcast(chunk: Buffer) {
@@ -213,8 +171,18 @@ class NarrationAudioStreamer {
   }
 
   public subscribe(cb: (chunk: Buffer) => void) {
-    // Deliver initial silence header so FFmpeg starts decoding cleanly
-    cb(Buffer.alloc(this.BYTES_PER_TICK * 2, 0));
+    // When a newly spawned FFmpeg process connects during a camera switch,
+    // immediately prime it with clean audio buffer
+    if (this.ringBuffer.length > 0) {
+      for (const chunk of this.ringBuffer) {
+        try {
+          cb(chunk);
+        } catch (e) {}
+      }
+    } else {
+      cb(Buffer.alloc(7056, 0));
+    }
+
     this.clients.push(cb);
     return () => {
       const idx = this.clients.indexOf(cb);
@@ -633,23 +601,23 @@ async function startServer() {
       const narrationVolume = Math.max(0, (db.stream_status.mic_narration_volume ?? 100) / 100);
 
       if (type === "web") {
-        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1:first_pts=0,aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else if (narrationInputIndex !== -1) {
         if (db.stream_status.mic_narration_mode === "mix" && hasAudio) {
           addLog(`[SERVER] ÁUDIO MISTO: Misturando voz do narrador (Ganho: ${Math.round(narrationVolume * 100)}%) com o som da câmera.\n`);
-          filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1:first_pts=0,aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[cam_a]`);
-          filterComplexParts.push(`[${narrationInputIndex}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
-          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=longest:dropout_transition=0,aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a_out]`);
+          filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[cam_a]`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
+          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=longest:dropout_transition=2,aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
         } else {
           addLog(`[SERVER] ÁUDIO NARRAÇÃO: Transmitindo apenas voz do narrador (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
-          filterComplexParts.push(`[${narrationInputIndex}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[a_out]`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[a_out]`);
         }
       } else if (hasAudio) {
         addLog("[SERVER] ÁUDIO NATIVO: Transmitindo som ambiente da câmera IP para o YouTube.\n");
-        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1:first_pts=0,aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else {
         addLog("[SERVER] ÁUDIO SILENCIOSO: Câmera sem microfone embutido. Enviando faixa silenciosa para o YouTube.\n");
-        filterComplexParts.push(`[${silenceInputIndex}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${silenceInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       }
 
       const mappingArgs = ["-map", videoOutLabel, "-map", audioOutLabel];
