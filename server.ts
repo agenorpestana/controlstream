@@ -984,8 +984,8 @@ async function startServer() {
 
     const isPreview = req.query.quality === "preview";
 
-    // Terminate old active high-quality stream ONLY if switching to a DIFFERENT camera ID
-    if (!isPreview && activeHighQualityMjpegProc && activeHighQualityCamId !== camId) {
+    // Terminate old active high-quality stream whenever a new one starts
+    if (!isPreview && activeHighQualityMjpegProc) {
       try { activeHighQualityMjpegProc.kill("SIGKILL"); } catch (e) {}
       activeHighQualityMjpegProc = null;
       activeHighQualityCamId = null;
