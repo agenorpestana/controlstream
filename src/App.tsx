@@ -52,7 +52,7 @@ interface StreamStatus {
 const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
   const [error, setError] = useState(false);
-  const [imgSrc, setImgSrc] = useState<string>(() => `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}`);
+  const [imgSrc, setImgSrc] = useState<string>(() => `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const isMountedRef = useRef(true);
 
@@ -68,13 +68,7 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
 
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
-        // Tab was returned to; reconnect MJPEG stream immediately to avoid frozen frames
         reloadStream();
-      } else {
-        // Tab backgrounded; clear src to prevent memory buffer congestion
-        if (imgRef.current) {
-          imgRef.current.src = '';
-        }
       }
     };
 
@@ -85,18 +79,10 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
     document.addEventListener('visibilitychange', handleVisibility);
     window.addEventListener('focus', handleWindowFocus);
 
-    // Watchdog: smoothly refresh connection every 45s while tab is visible to prevent silent TCP stalls
-    const watchdogInterval = setInterval(() => {
-      if (document.visibilityState === 'visible' && !error) {
-        reloadStream();
-      }
-    }, 45000);
-
     return () => {
       isMountedRef.current = false;
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('focus', handleWindowFocus);
-      clearInterval(watchdogInterval);
       if (imgRef.current) {
         imgRef.current.src = '';
         imgRef.current.removeAttribute('src');
@@ -108,10 +94,10 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
     <div className={`relative bg-black/40 overflow-hidden ${className}`}>
       {error && (
         <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-black/80 z-10">
-          <p className="text-red-400 text-[10px] font-bold uppercase mb-2">Aguardando Câmera...</p>
+          <p className="text-amber-400 text-[10px] font-bold uppercase mb-2">Conectando Câmera...</p>
           <button 
             onClick={reloadStream}
-            className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors cursor-pointer"
+            className="p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors cursor-pointer"
             title="Recarregar Câmera"
           >
             <RefreshCw className="w-4 h-4 text-white animate-spin" />

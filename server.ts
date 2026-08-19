@@ -1005,8 +1005,8 @@ async function startServer() {
 
     const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
     const transportOpts = isRtmp 
-      ? ["-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"] 
-      : ["-rtsp_transport", "tcp", "-stimeout", "3000000", "-flags", "+low_delay", "-reconnect", "1", "-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"];
+      ? [] 
+      : ["-rtsp_transport", "tcp", "-stimeout", "5000000", "-flags", "+low_delay"];
 
     const args = [
       "-thread_queue_size", "4096",
