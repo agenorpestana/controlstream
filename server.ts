@@ -872,6 +872,12 @@ async function startServer() {
     res.json(getDb().cameras);
   });
 
+  interface CameraHealth {
+    isOnline: boolean;
+    lastChecked: number;
+  }
+  const camHealthCache: Record<number | string, CameraHealth> = {};
+
   interface SnapshotCacheItem {
     data: Buffer;
     timestamp: number;
@@ -879,6 +885,20 @@ async function startServer() {
     pendingResolvers: ((buf: Buffer | null) => void)[];
   }
   const snapshotCaches: Record<number, SnapshotCacheItem> = {};
+
+  const FALLBACK_JPEG = Buffer.from([
+    0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x01, 0x00, 0x48,
+    0x00, 0x48, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08,
+    0x07, 0x07, 0x07, 0x09, 0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D, 0x0C, 0x0B, 0x0B, 0x0C, 0x19, 0x12,
+    0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D, 0x1A, 0x1C, 0x1C, 0x20, 0x24, 0x2E, 0x27, 0x20,
+    0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29, 0x2C, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1F, 0x27,
+    0x39, 0x3D, 0x38, 0x32, 0x3C, 0x2E, 0x33, 0x34, 0x32, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01,
+    0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00, 0x1F, 0x00, 0x00, 0x01, 0x05, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04,
+    0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0xFF, 0xC4, 0x00, 0x11, 0x10, 0x00, 0x02, 0x02, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xFF, 0xDA, 0x00,
+    0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0xD2, 0xCF, 0x20, 0xFF, 0xD9
+  ]);
 
   app.get("/api/cameras/:id/snapshot", authenticate, (req, res) => {
     const db = getDb();
@@ -897,21 +917,7 @@ async function startServer() {
 
     const cache = snapshotCaches[camId];
     const now = Date.now();
-    const CACHE_TTL = 1500; // 1.5s cache TTL for lightweight, responsive snapshots without server overload
-
-    const FALLBACK_JPEG = Buffer.from([
-      0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x01, 0x00, 0x48,
-      0x00, 0x48, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08,
-      0x07, 0x07, 0x07, 0x09, 0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D, 0x0C, 0x0B, 0x0B, 0x0C, 0x19, 0x12,
-      0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D, 0x1A, 0x1C, 0x1C, 0x20, 0x24, 0x2E, 0x27, 0x20,
-      0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29, 0x2C, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1F, 0x27,
-      0x39, 0x3D, 0x38, 0x32, 0x3C, 0x2E, 0x33, 0x34, 0x32, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01,
-      0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00, 0x1F, 0x00, 0x00, 0x01, 0x05, 0x01, 0x01,
-      0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04,
-      0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0xFF, 0xC4, 0x00, 0x11, 0x10, 0x00, 0x02, 0x02, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xFF, 0xDA, 0x00,
-      0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0xD2, 0xCF, 0x20, 0xFF, 0xD9
-    ]);
+    const CACHE_TTL = 1800; // 1.8s cache TTL
 
     const deliverBuffer = (buf: Buffer | null) => {
       if (res.headersSent) return;
@@ -924,7 +930,7 @@ async function startServer() {
       }
     };
 
-    // If stale cache exists, serve it immediately to client while refreshing in background if expired
+    // If cache is fresh or stale, serve immediately to prevent socket starvation
     if (cache.data.length > 0) {
       deliverBuffer(cache.data);
       if (now - cache.timestamp < CACHE_TTL || cache.isFetching) {
@@ -932,23 +938,29 @@ async function startServer() {
       }
     }
 
+    // Check if camera was recently known to be offline (within 8 seconds)
+    const health = camHealthCache[camId];
+    if (health && !health.isOnline && (now - health.lastChecked < 8000)) {
+      deliverBuffer(cache.data.length > 0 ? cache.data : null);
+      return;
+    }
+
     if (cache.isFetching) {
       cache.pendingResolvers.push(deliverBuffer);
       return;
     }
 
-    // Capture new snapshot in background
+    // Capture new snapshot in background with fast 1.2s timeout
     cache.isFetching = true;
 
     const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
-    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-stimeout", "3000000"];
+    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-stimeout", "1200000"];
 
     const args = [
-      "-thread_queue_size", "2048",
-      "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
+      "-fflags", "+nobuffer+discardcorrupt",
       ...transportOpts,
-      "-probesize", "500000",
-      "-analyzeduration", "500000",
+      "-probesize", "250000",
+      "-analyzeduration", "250000",
       "-i", cam.rtsp_url,
       "-vf", "scale=480:-1",
       "-frames:v", "1",
@@ -959,18 +971,26 @@ async function startServer() {
       "pipe:1"
     ];
 
-    const ffmpeg = spawn("ffmpeg", args);
+    let ffmpeg: any = null;
+    try {
+      ffmpeg = spawn("ffmpeg", args);
+    } catch (e) {
+      cache.isFetching = false;
+      deliverBuffer(null);
+      return;
+    }
+
     const chunks: Buffer[] = [];
 
     const timeout = setTimeout(() => {
       try { ffmpeg.kill("SIGKILL"); } catch (e) {}
-    }, 3500);
+    }, 1400);
 
-    ffmpeg.stdout.on("data", (chunk) => {
+    ffmpeg.stdout.on("data", (chunk: Buffer) => {
       chunks.push(chunk);
     });
 
-    ffmpeg.on("close", (code) => {
+    ffmpeg.on("close", (code: number) => {
       clearTimeout(timeout);
       cache.isFetching = false;
       
@@ -981,11 +1001,12 @@ async function startServer() {
         const fullBuffer = Buffer.concat(chunks);
         cache.data = fullBuffer;
         cache.timestamp = Date.now();
+        camHealthCache[camId] = { isOnline: true, lastChecked: Date.now() };
         
         deliverBuffer(fullBuffer);
         resolvers.forEach(r => r(fullBuffer));
       } else {
-        // Fallback to stale buffer if available
+        camHealthCache[camId] = { isOnline: false, lastChecked: Date.now() };
         if (cache.data.length > 0) {
           deliverBuffer(cache.data);
           resolvers.forEach(r => r(cache.data));
@@ -996,21 +1017,16 @@ async function startServer() {
       }
     });
 
-    ffmpeg.on("error", (err) => {
+    ffmpeg.on("error", () => {
       clearTimeout(timeout);
       cache.isFetching = false;
+      camHealthCache[camId] = { isOnline: false, lastChecked: Date.now() };
       
       const resolvers = [...cache.pendingResolvers];
       cache.pendingResolvers = [];
 
-      if (cache.data.length > 0) {
-        deliverBuffer(cache.data);
-        resolvers.forEach(r => r(cache.data));
-      } else {
-        console.error("Erro no spawn do ffmpeg para snapshot:", err);
-        deliverBuffer(null);
-        resolvers.forEach(r => r(null));
-      }
+      deliverBuffer(cache.data.length > 0 ? cache.data : null);
+      resolvers.forEach(r => r(cache.data.length > 0 ? cache.data : null));
     });
   });
 
@@ -1046,22 +1062,22 @@ async function startServer() {
       "X-Accel-Buffering": "no"
     });
 
-    const scaleFilter = isPreview ? "scale=540:-1" : "scale=960:-1";
-    const fpsRate = isPreview ? "25" : "30";
-    const qualityVal = isPreview ? "6" : "3";
+    const scaleFilter = isPreview ? "scale=480:-1" : "scale=960:-1";
+    const fpsRate = isPreview ? "15" : "30";
+    const qualityVal = isPreview ? "7" : "3";
 
     const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
     const transportOpts = isRtmp 
       ? [] 
-      : ["-rtsp_transport", "tcp", "-stimeout", "5000000", "-flags", "+low_delay"];
+      : ["-rtsp_transport", "tcp", "-stimeout", "1500000", "-flags", "+low_delay"];
 
     const args = [
-      "-thread_queue_size", "4096",
+      "-thread_queue_size", "2048",
       "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
       "-fpsprobesize", "0",
       ...transportOpts,
-      "-probesize", "500000",
-      "-analyzeduration", "500000",
+      "-probesize", "350000",
+      "-analyzeduration", "350000",
       "-i", cam.rtsp_url,
       "-r", fpsRate,
       "-vf", scaleFilter,
@@ -1074,7 +1090,14 @@ async function startServer() {
       "-"
     ];
 
-    const ff = spawn("ffmpeg", args);
+    let ff: any = null;
+    try {
+      ff = spawn("ffmpeg", args);
+    } catch (e) {
+      if (!res.writableEnded) res.end();
+      return;
+    }
+
     if (isPreview) {
       activeCardMjpegProcs[camId] = ff;
     } else {
@@ -1118,9 +1141,8 @@ async function startServer() {
       req.socket.on("close", cleanup);
       req.socket.on("error", cleanup);
     }
-    ff.on("close", () => {
-      cleanup();
-    });
+    ff.on("close", cleanup);
+    ff.on("error", cleanup);
   });
 
   // Dedicated Camera Audio Monitoring Endpoint for Local Audio Return / Fones
