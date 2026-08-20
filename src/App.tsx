@@ -53,6 +53,7 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
   const token = localStorage.getItem('token');
   const [error, setError] = useState(false);
   const [imgSrc, setImgSrc] = useState<string>(() => `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
+  const [snapshotSrc] = useState<string>(() => `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const isMountedRef = useRef(true);
 
@@ -102,7 +103,16 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
   };
 
   return (
-    <div className={`relative bg-black/40 overflow-hidden ${className}`}>
+    <div className={`relative bg-[#0d0e12] overflow-hidden ${className}`}>
+      {/* Instant Snapshot Base to prevent black screens during connection */}
+      <img
+        src={snapshotSrc}
+        alt=""
+        aria-hidden="true"
+        className="absolute inset-0 w-full h-full object-contain pointer-events-none opacity-80"
+        onError={(e) => { (e.target as HTMLElement).style.display = 'none'; }}
+      />
+
       {error && (
         <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-black/80 z-10">
           <p className="text-amber-400 text-[10px] font-bold uppercase mb-2">Conectando Câmera...</p>
@@ -119,7 +129,7 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
         ref={imgRef}
         src={imgSrc} 
         alt={`Camera ${camId}`}
-        className="w-full h-full object-contain"
+        className="relative z-[1] w-full h-full object-contain"
         onError={() => {
           if (!isMountedRef.current) return;
           setError(true);

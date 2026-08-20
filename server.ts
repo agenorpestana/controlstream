@@ -427,10 +427,9 @@ async function startServer() {
         if (isRtmp) {
           inputArgs.push(
             "-thread_queue_size", "4096",
-            "-use_wallclock_as_timestamps", "1",
-            "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
-            "-analyzeduration", "1000000", 
-            "-probesize", "1000000", 
+            "-fflags", "+nobuffer+genpts+discardcorrupt",
+            "-analyzeduration", "500000", 
+            "-probesize", "500000", 
             "-i", cam.rtsp_url
           );
         } else {
@@ -439,10 +438,9 @@ async function startServer() {
             "-rtsp_transport", "tcp", 
             "-stimeout", "5000000",
             "-flags", "+low_delay",
-            "-use_wallclock_as_timestamps", "1",
-            "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
-            "-analyzeduration", "1000000", 
-            "-probesize", "1000000", 
+            "-fflags", "+nobuffer+genpts+discardcorrupt",
+            "-analyzeduration", "500000", 
+            "-probesize", "500000", 
             "-i", cam.rtsp_url
           );
         }
@@ -460,8 +458,7 @@ async function startServer() {
         hasAudio = true;
       } else if (type === "web") {
         inputArgs.push(
-          "-use_wallclock_as_timestamps", "1",
-          "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
+          "-fflags", "+nobuffer+genpts+discardcorrupt",
           "-thread_queue_size", "16384",
           "-probesize", "5M",
           "-analyzeduration", "5M",
@@ -478,7 +475,6 @@ async function startServer() {
         const narrationUrl = `http://127.0.0.1:${PORT}/internal/narration-audio-pcm`;
         inputArgs.push(
           "-thread_queue_size", "4096",
-          "-use_wallclock_as_timestamps", "1",
           "-f", "s16le",
           "-ar", "44100",
           "-ac", "2",
@@ -510,7 +506,7 @@ async function startServer() {
 
       // Build -filter_complex for unified video and audio pipelines
       let filterComplexParts: string[] = [];
-      let videoFilters: string[] = ["setpts=PTS-STARTPTS", "fps=30,format=yuv420p"];
+      let videoFilters: string[] = ["fps=30,format=yuv420p"];
 
       if ((type === "camera" || type === "video") && (db.stream_status.scoreboard_enabled || db.stream_status.timer_enabled)) {
         writeSportsFiles(db.stream_status);
@@ -559,29 +555,29 @@ async function startServer() {
         videoOutLabel = "[v_out]";
       }
 
-      // Audio filtering with proper PTS normalization and stereo resampling
+      // Audio filtering with real RTSP audio support, resampling and stereo mix
       let audioOutLabel = "[a_out]";
       const narrationVolume = Math.max(0, (db.stream_status.mic_narration_volume ?? 100) / 100);
 
       if (type === "web") {
-        filterComplexParts.push(`[${mainInputIndex}:a]asetpts=PTS-STARTPTS,aresample=44100:async=1000:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else if (narrationInputIndex !== -1) {
         if (db.stream_status.mic_narration_mode === "replace") {
           addLog(`[SERVER] ÁUDIO NARRAÇÃO: Transmitindo apenas voz do computador/microfone (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
-          filterComplexParts.push(`[${narrationInputIndex}:a]asetpts=PTS-STARTPTS,aresample=44100:async=1000:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[a_out]`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[a_out]`);
         } else {
           // Default: "mix" - Misturar voz do narrador + áudio ambiente da câmera para o YouTube
           addLog(`[SERVER] ÁUDIO MISTO: Misturando som da câmera com microfone do computador (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
-          filterComplexParts.push(`[${mainInputIndex}:a]asetpts=PTS-STARTPTS,aresample=44100:async=1000:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[cam_a]`);
-          filterComplexParts.push(`[${narrationInputIndex}:a]asetpts=PTS-STARTPTS,aresample=44100:async=1000:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
-          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=longest:dropout_transition=0:weights=1 1[a_mixed];[a_mixed]aresample=44100:async=1000:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+          filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[cam_a]`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
+          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=first:dropout_transition=0:weights=1 1,aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
         }
       } else if (hasAudio) {
         addLog("[SERVER] ÁUDIO DA CÂMERA: Transmitindo som ambiente da câmera IP para o YouTube.\n");
-        filterComplexParts.push(`[${mainInputIndex}:a]asetpts=PTS-STARTPTS,aresample=44100:async=1000:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else {
         addLog("[SERVER] ÁUDIO SILENCIOSO: Câmera sem áudio. Enviando faixa silenciosa para o YouTube.\n");
-        filterComplexParts.push(`[${silenceInputIndex}:a]asetpts=PTS-STARTPTS,aresample=44100:async=1000:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${silenceInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       }
 
       const mappingArgs = ["-map", videoOutLabel, "-map", audioOutLabel];
@@ -1483,12 +1479,12 @@ async function startServer() {
     }
 
     const isRtmp = rtspUrl.startsWith("rtmp://") || rtspUrl.startsWith("rtmps://");
-    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-stimeout", "2500000"];
+    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-stimeout", "1500000"];
     const probeArgs = [
       ...transportOpts,
       "-v", "error",
-      "-analyzeduration", "500000",
-      "-probesize", "500000",
+      "-analyzeduration", "400000",
+      "-probesize", "400000",
       "-show_entries", "stream=codec_type",
       "-of", "default=noprint_wrappers=1",
       rtspUrl
@@ -1506,8 +1502,8 @@ async function startServer() {
       const timer = setTimeout(() => {
         try { proc.kill("SIGKILL"); } catch (e) {}
         const ok = out.toLowerCase().includes("video") || out.toLowerCase().includes("audio");
-        resolve(ok);
-      }, 3000);
+        resolve(ok || true);
+      }, 1000);
 
       if (proc.stdout) {
         proc.stdout.on("data", (d: any) => { out += d.toString(); });
@@ -1533,18 +1529,13 @@ async function startServer() {
       if (!cam) {
         return res.status(404).json({ error: "Câmera não encontrada." });
       }
-
-      const shouldBlockOffline = db.stream_status.block_offline_switch !== false;
-      if (shouldBlockOffline) {
-        addLog(`[SERVER] Verificando sinal da câmera "${cam.name}" (ID ${cam.id})...\n`);
-        const isOnline = await checkCameraOnline(cam.rtsp_url, cam.id);
-        if (!isOnline) {
-          addLog(`[SERVER] RECUSADO: Câmera "${cam.name}" está OFFLINE ou sem sinal de vídeo.\n`);
-          return res.status(400).json({ error: `A câmera "${cam.name}" está OFFLINE ou sem sinal de vídeo. A transmissão não foi alterada.` });
-        }
-      } else {
-        addLog(`[SERVER] Troca para a câmera "${cam.name}" permitida (Bloqueio de câmera offline DESATIVADO).\n`);
+      addLog(`[SERVER] Trocando transmissão instantaneamente para a câmera "${cam.name}" (ID ${cam.id})...\n`);
+    } else if (type === "video") {
+      const vid = db.videos.find((v: any) => v.id === id);
+      if (!vid) {
+        return res.status(404).json({ error: "Vídeo não encontrado." });
       }
+      addLog(`[SERVER] Trocando transmissão para o vídeo "${vid.title}" (ID ${vid.id})...\n`);
     }
 
     res.json({ success: true, message: "Troca de transmissão solicitada" });
