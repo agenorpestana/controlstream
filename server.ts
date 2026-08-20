@@ -427,8 +427,8 @@ async function startServer() {
         if (isRtmp) {
           inputArgs.push(
             "-thread_queue_size", "4096",
+            "-use_wallclock_as_timestamps", "1",
             "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
-            "-fpsprobesize", "0",
             "-analyzeduration", "1000000", 
             "-probesize", "1000000", 
             "-i", cam.rtsp_url
@@ -439,8 +439,8 @@ async function startServer() {
             "-rtsp_transport", "tcp", 
             "-stimeout", "5000000",
             "-flags", "+low_delay",
+            "-use_wallclock_as_timestamps", "1",
             "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
-            "-fpsprobesize", "0",
             "-analyzeduration", "1000000", 
             "-probesize", "1000000", 
             "-i", cam.rtsp_url
@@ -510,7 +510,7 @@ async function startServer() {
 
       // Build -filter_complex for unified video and audio pipelines
       let filterComplexParts: string[] = [];
-      let videoFilters: string[] = ["fps=30,format=yuv420p"];
+      let videoFilters: string[] = ["setpts=PTS-STARTPTS", "fps=30,format=yuv420p"];
 
       if ((type === "camera" || type === "video") && (db.stream_status.scoreboard_enabled || db.stream_status.timer_enabled)) {
         writeSportsFiles(db.stream_status);
@@ -559,29 +559,29 @@ async function startServer() {
         videoOutLabel = "[v_out]";
       }
 
-      // Audio filtering (Zero Slow-Motion, Clean Resampling)
+      // Audio filtering with proper PTS normalization and stereo resampling
       let audioOutLabel = "[a_out]";
       const narrationVolume = Math.max(0, (db.stream_status.mic_narration_volume ?? 100) / 100);
 
       if (type === "web") {
-        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${mainInputIndex}:a]asetpts=PTS-STARTPTS,aresample=44100:async=1000:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else if (narrationInputIndex !== -1) {
         if (db.stream_status.mic_narration_mode === "replace") {
           addLog(`[SERVER] ÁUDIO NARRAÇÃO: Transmitindo apenas voz do computador/microfone (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
-          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[a_out]`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]asetpts=PTS-STARTPTS,aresample=44100:async=1000:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[a_out]`);
         } else {
           // Default: "mix" - Misturar voz do narrador + áudio ambiente da câmera para o YouTube
           addLog(`[SERVER] ÁUDIO MISTO: Misturando som da câmera com microfone do computador (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
-          filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[cam_a]`);
-          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
-          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=longest:dropout_transition=0,aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+          filterComplexParts.push(`[${mainInputIndex}:a]asetpts=PTS-STARTPTS,aresample=44100:async=1000:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[cam_a]`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]asetpts=PTS-STARTPTS,aresample=44100:async=1000:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
+          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=longest:dropout_transition=0:weights=1 1[a_mixed];[a_mixed]aresample=44100:async=1000:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
         }
       } else if (hasAudio) {
         addLog("[SERVER] ÁUDIO DA CÂMERA: Transmitindo som ambiente da câmera IP para o YouTube.\n");
-        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${mainInputIndex}:a]asetpts=PTS-STARTPTS,aresample=44100:async=1000:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else {
         addLog("[SERVER] ÁUDIO SILENCIOSO: Câmera sem áudio. Enviando faixa silenciosa para o YouTube.\n");
-        filterComplexParts.push(`[${silenceInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${silenceInputIndex}:a]asetpts=PTS-STARTPTS,aresample=44100:async=1000:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       }
 
       const mappingArgs = ["-map", videoOutLabel, "-map", audioOutLabel];
