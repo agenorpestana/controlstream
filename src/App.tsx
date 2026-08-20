@@ -52,55 +52,45 @@ interface StreamStatus {
 const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
   const [error, setError] = useState(false);
-  const [imgSrc, setImgSrc] = useState<string>(() => {
-    if (quality === 'high') {
-      return `/api/cameras/${camId}/mjpeg?token=${token}&quality=high&_t=${Date.now()}`;
-    }
-    return `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`;
-  });
+  const [imgSrc, setImgSrc] = useState<string>(() => `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
+  const [snapshotSrc] = useState<string>(() => `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const isMountedRef = useRef(true);
 
   const reloadStream = () => {
     if (!isMountedRef.current) return;
     setError(false);
-    if (quality === 'high') {
-      setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=high&_t=${Date.now()}`);
-    } else {
-      setImgSrc(`/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
-    }
+    setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
   };
 
   useEffect(() => {
     isMountedRef.current = true;
     reloadStream();
 
-    // In preview mode (cards), refresh snapshot every 2.5s gracefully
-    let interval: NodeJS.Timeout | null = null;
-    if (quality === 'preview') {
-      interval = setInterval(() => {
-        if (document.visibilityState === 'visible' && isMountedRef.current) {
-          setImgSrc(`/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
-        }
-      }, 2500);
-    }
-
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
         reloadStream();
       } else {
-        if (imgRef.current && quality === 'high') {
+        // Detach stream while in another tab so browser sockets and server FFmpeg are freed
+        if (imgRef.current) {
           imgRef.current.src = '';
         }
       }
     };
 
+    const handleWindowFocus = () => {
+      if (document.visibilityState === 'visible') {
+        reloadStream();
+      }
+    };
+
     document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleWindowFocus);
 
     return () => {
       isMountedRef.current = false;
-      if (interval) clearInterval(interval);
       document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleWindowFocus);
       if (imgRef.current) {
         imgRef.current.src = '';
         imgRef.current.removeAttribute('src');
@@ -108,17 +98,30 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
     };
   }, [camId, quality, token]);
 
+  const handleManualRetry = () => {
+    reloadStream();
+  };
+
   return (
     <div className={`relative bg-[#0d0e12] overflow-hidden ${className}`}>
+      {/* Instant Snapshot Base to prevent black screens during connection */}
+      <img
+        src={snapshotSrc}
+        alt=""
+        aria-hidden="true"
+        className="absolute inset-0 w-full h-full object-contain pointer-events-none opacity-80"
+        onError={(e) => { (e.target as HTMLElement).style.display = 'none'; }}
+      />
+
       {error && (
         <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-black/80 z-10">
-          <p className="text-amber-400 text-[10px] font-bold uppercase mb-2">Câmera Indisponível / Offline</p>
+          <p className="text-amber-400 text-[10px] font-bold uppercase mb-2">Conectando Câmera...</p>
           <button 
-            onClick={reloadStream}
+            onClick={handleManualRetry}
             className="p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors cursor-pointer"
             title="Recarregar Câmera"
           >
-            <RefreshCw className="w-4 h-4 text-white" />
+            <RefreshCw className="w-4 h-4 text-white animate-spin" />
           </button>
         </div>
       )}
@@ -126,13 +129,10 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
         ref={imgRef}
         src={imgSrc} 
         alt={`Camera ${camId}`}
-        className="w-full h-full object-contain"
+        className="relative z-[1] w-full h-full object-contain"
         onError={() => {
           if (!isMountedRef.current) return;
           setError(true);
-        }}
-        onLoad={() => {
-          if (error) setError(false);
         }}
       />
     </div>
