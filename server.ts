@@ -345,15 +345,24 @@ async function startServer() {
   app.use("/uploads", express.static(uploadsDir));
 
   let manualStop = false;
+  let activeStreamSession = 0;
+  let autoReconnectTimer: NodeJS.Timeout | null = null;
+
   const stopStream = (isSwitching = false) => {
     console.log(`[SERVER] stopStream chamado (isSwitching=${isSwitching})`);
+    if (autoReconnectTimer) {
+      clearTimeout(autoReconnectTimer);
+      autoReconnectTimer = null;
+    }
     if (!isSwitching) {
       manualStop = true;
+      activeStreamSession++;
     }
     if (ffmpegProcess) {
       ffmpegProcess.removeAllListeners("close");
       ffmpegProcess.removeAllListeners("exit");
-      ffmpegProcess.kill("SIGKILL");
+      ffmpegProcess.removeAllListeners("error");
+      try { ffmpegProcess.kill("SIGKILL"); } catch (e) {}
       ffmpegProcess = null;
     }
     ffmpegLogs = [];
@@ -373,15 +382,69 @@ async function startServer() {
   let activeHighQualityCamId: number | null = null;
   const camAudioCache: Record<number | string, boolean> = {};
 
+  const probeCameraHasAudio = async (rtspUrl: string, camId: number | string): Promise<boolean> => {
+    if (camAudioCache[camId] !== undefined) {
+      return camAudioCache[camId];
+    }
+    const isRtmp = rtspUrl && (rtspUrl.startsWith("rtmp://") || rtspUrl.startsWith("rtmps://"));
+    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-stimeout", "1500000"];
+
+    return new Promise<boolean>((resolve) => {
+      let proc: any = null;
+      let out = "";
+      try {
+        proc = spawn("ffprobe", [
+          ...transportOpts,
+          "-v", "error",
+          "-select_streams", "a:0",
+          "-show_entries", "stream=codec_type",
+          "-of", "default=noprint_wrappers=1",
+          rtspUrl
+        ]);
+      } catch (e) {
+        camAudioCache[camId] = false;
+        return resolve(false);
+      }
+
+      const timer = setTimeout(() => {
+        try { proc.kill("SIGKILL"); } catch (e) {}
+        const ok = out.toLowerCase().includes("audio");
+        camAudioCache[camId] = ok;
+        resolve(ok);
+      }, 900);
+
+      if (proc.stdout) {
+        proc.stdout.on("data", (d: any) => { out += d.toString(); });
+      }
+      proc.on("close", () => {
+        clearTimeout(timer);
+        const ok = out.toLowerCase().includes("audio");
+        camAudioCache[camId] = ok;
+        resolve(ok);
+      });
+      proc.on("error", () => {
+        clearTimeout(timer);
+        camAudioCache[camId] = false;
+        resolve(false);
+      });
+    });
+  };
+
   const startStream = async (type: "camera" | "video" | "web", id: number | string) => {
     manualStop = false;
+    if (autoReconnectTimer) {
+      clearTimeout(autoReconnectTimer);
+      autoReconnectTimer = null;
+    }
+    const thisSessionId = ++activeStreamSession;
+
     // If a probe is already running, cancel it so the new request can execute immediately
     if (activeProbeProc) {
       try { activeProbeProc.kill("SIGKILL"); } catch (e) {}
       activeProbeProc = null;
     }
     isStarting = true;
-    const msg = `[SERVER] startStream chamado: type=${type}, id=${id}`;
+    const msg = `[SERVER] startStream chamado: type=${type}, id=${id} (sessão ${thisSessionId})`;
     console.log(msg);
     
     try {
@@ -415,14 +478,17 @@ async function startServer() {
 
         const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
 
-        // Fast probe or default to true for IP/RTSP/RTMP cameras
-        let probedAudio = cam.has_audio;
-        if (probedAudio === undefined) {
-          probedAudio = true;
-          cam.has_audio = true;
+        // Fast probe audio presence to avoid FFmpeg fatal filtergraph errors on cameras without mic
+        hasAudio = await probeCameraHasAudio(cam.rtsp_url, cam.id);
+        if (cam.has_audio !== hasAudio) {
+          cam.has_audio = hasAudio;
           saveDb(db);
         }
-        hasAudio = cam.has_audio !== false;
+
+        if (thisSessionId !== activeStreamSession) {
+          console.log(`[SERVER] Sessão ${thisSessionId} descartada por solicitação mais recente.`);
+          return;
+        }
 
         if (isRtmp) {
           inputArgs.push(
@@ -497,9 +563,9 @@ async function startServer() {
         logoInputIndex = nextInputIndex++;
       }
 
-      // Add Silent audio generator if camera has no audio AND narration is not enabled
+      // Add Silent audio generator if camera has no audio
       let silenceInputIndex = -1;
-      if (!hasAudio && narrationInputIndex === -1 && type !== "web") {
+      if (!hasAudio && type !== "web") {
         inputArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100");
         silenceInputIndex = nextInputIndex++;
       }
@@ -562,11 +628,11 @@ async function startServer() {
       if (type === "web") {
         filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else if (narrationInputIndex !== -1) {
-        if (db.stream_status.mic_narration_mode === "replace") {
-          addLog(`[SERVER] ÁUDIO NARRAÇÃO: Transmitindo apenas voz do computador/microfone (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
+        if (db.stream_status.mic_narration_mode === "replace" || !hasAudio) {
+          addLog(`[SERVER] ÁUDIO NARRAÇÃO: Transmitindo voz do computador/microfone (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
           filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[a_out]`);
         } else {
-          // Default: "mix" - Misturar voz do narrador + áudio ambiente da câmera para o YouTube
+          // "mix" mode with camera that has audio
           addLog(`[SERVER] ÁUDIO MISTO: Misturando som da câmera com microfone do computador (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
           filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[cam_a]`);
           filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
@@ -576,7 +642,7 @@ async function startServer() {
         addLog("[SERVER] ÁUDIO DA CÂMERA: Transmitindo som ambiente da câmera IP para o YouTube.\n");
         filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else {
-        addLog("[SERVER] ÁUDIO SILENCIOSO: Câmera sem áudio. Enviando faixa silenciosa para o YouTube.\n");
+        addLog("[SERVER] ÁUDIO SILENCIOSO: Câmera sem microfone embutido. Enviando faixa silenciosa para o YouTube.\n");
         filterComplexParts.push(`[${silenceInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       }
 
@@ -632,11 +698,17 @@ async function startServer() {
       }
 
       ffmpegProcess.on("error", (err) => {
+        if (thisSessionId !== activeStreamSession) return;
         console.error("Erro no processo FFmpeg:", err);
         addLog(`ERRO NO PROCESSO FFMPEG: ${err.message}\n`);
       });
 
       ffmpegProcess.on("exit", (code, signal) => {
+        if (thisSessionId !== activeStreamSession) {
+          console.log(`[SERVER] Processo antigo (sessão ${thisSessionId}) ignorado pois a sessão ativa é ${activeStreamSession}`);
+          return;
+        }
+
         const msg = `[SERVER] FFmpeg parou (Código: ${code}, Sinal: ${signal})`;
         console.log(msg);
         addLog(`${msg}\n`);
@@ -659,22 +731,24 @@ async function startServer() {
             addLog(`${autoReturnMsg}\n`);
             stopStream(true);
             setTimeout(() => {
-              startStream("camera", targetCam.id);
+              if (activeStreamSession === thisSessionId) {
+                startStream("camera", targetCam.id);
+              }
             }, 500);
             return;
           }
         }
 
-        // Auto-reconnect if it was a camera and not stopped manually
+        // Auto-reconnect ONLY if it was unexpected exit on current active camera and not superseded
         if (!manualStop && type === "camera" && currentDb.stream_status.is_streaming) {
-          addLog(`[SERVER] Reconectando automaticamente à câmera ID ${id} em 2s...\n`);
+          addLog(`[SERVER] Reconectando à câmera ID ${id} em 2.5s...\n`);
           stopStream(true);
-          setTimeout(() => {
+          autoReconnectTimer = setTimeout(() => {
             const freshDb = getDb();
-            if (freshDb.stream_status.is_streaming && freshDb.stream_status.current_source_type === "camera") {
+            if (freshDb.stream_status.is_streaming && freshDb.stream_status.current_source_type === "camera" && activeStreamSession === thisSessionId) {
               startStream("camera", id);
             }
-          }, 2000);
+          }, 2500);
           return;
         }
 
@@ -683,11 +757,14 @@ async function startServer() {
 
       if (type === "web") {
         setTimeout(() => {
-          io.emit("server_ready_for_web");
+          if (activeStreamSession === thisSessionId) {
+            io.emit("server_ready_for_web");
+          }
         }, 2000);
       }
 
       ffmpegProcess.on("close", (code) => {
+        if (thisSessionId !== activeStreamSession) return;
         console.log(`Processo FFmpeg encerrado com código ${code}`);
         addLog(`FFmpeg encerrado com código ${code}\n`);
         if (ffmpegProcess) {
@@ -696,6 +773,7 @@ async function startServer() {
       });
 
       ffmpegProcess.stderr?.on("data", (data) => {
+        if (thisSessionId !== activeStreamSession) return;
         const log = data.toString();
         // Log more aggressively during startup to catch errors
         addLog(log);
@@ -1131,6 +1209,7 @@ async function startServer() {
   app.put("/api/cameras/:id", authenticate, async (req, res) => {
     const camId = parseInt(req.params.id);
     const { name, rtsp_url } = req.body;
+    delete camAudioCache[camId];
     const updated = await dbUpdateCamera(camId, { name, rtsp_url });
     if (!updated) return res.status(404).json({ error: "Câmera não encontrada" });
     io.emit("cameras", getDb().cameras);
@@ -1139,6 +1218,7 @@ async function startServer() {
 
   app.delete("/api/cameras/:id", authenticate, async (req, res) => {
     const camId = parseInt(req.params.id);
+    delete camAudioCache[camId];
     await dbDeleteCamera(camId);
     io.emit("cameras", getDb().cameras);
     res.json({ success: true });
