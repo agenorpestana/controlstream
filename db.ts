@@ -47,11 +47,22 @@ export interface StreamStatus {
   system_domain?: string;
   loop_video?: boolean;
   scoreboard_enabled?: boolean;
+  scoreboard_style?: 'soccer' | 'tennis';
   timer_enabled?: boolean;
   team_a_name?: string;
   team_b_name?: string;
   score_a?: number;
   score_b?: number;
+  tennis_player_a?: string;
+  tennis_player_b?: string;
+  tennis_sets_a?: string;
+  tennis_sets_b?: string;
+  tennis_games_a?: number;
+  tennis_games_b?: number;
+  tennis_points_a?: string;
+  tennis_points_b?: string;
+  tennis_server?: 'a' | 'b' | 'none';
+  tennis_tiebreak?: boolean;
   timer_seconds?: number;
   timer_running?: boolean;
   logo_enabled?: boolean;
@@ -101,11 +112,22 @@ const getDefaultDbState = (): AppDatabase => ({
     system_domain: "",
     loop_video: false,
     scoreboard_enabled: false,
+    scoreboard_style: "soccer",
     timer_enabled: false,
     team_a_name: "TIME A",
     team_b_name: "TIME B",
     score_a: 0,
     score_b: 0,
+    tennis_player_a: "JOGADOR 1",
+    tennis_player_b: "JOGADOR 2",
+    tennis_sets_a: "0",
+    tennis_sets_b: "0",
+    tennis_games_a: 0,
+    tennis_games_b: 0,
+    tennis_points_a: "0",
+    tennis_points_b: "0",
+    tennis_server: "a",
+    tennis_tiebreak: false,
     timer_seconds: 0,
     timer_running: false,
     logo_enabled: false,
@@ -235,11 +257,22 @@ export async function initDatabase(): Promise<AppDatabase> {
       await safeAddColumn("stream_status", "mic_narration_mode VARCHAR(50) DEFAULT 'replace'");
       await safeAddColumn("stream_status", "mic_narration_volume INT DEFAULT 100");
       await safeAddColumn("stream_status", "scoreboard_enabled BOOLEAN DEFAULT FALSE");
+      await safeAddColumn("stream_status", "scoreboard_style VARCHAR(50) DEFAULT 'soccer'");
       await safeAddColumn("stream_status", "timer_enabled BOOLEAN DEFAULT FALSE");
       await safeAddColumn("stream_status", "team_a_name VARCHAR(100) DEFAULT 'TIME A'");
       await safeAddColumn("stream_status", "team_b_name VARCHAR(100) DEFAULT 'TIME B'");
       await safeAddColumn("stream_status", "score_a INT DEFAULT 0");
       await safeAddColumn("stream_status", "score_b INT DEFAULT 0");
+      await safeAddColumn("stream_status", "tennis_player_a VARCHAR(100) DEFAULT 'JOGADOR 1'");
+      await safeAddColumn("stream_status", "tennis_player_b VARCHAR(100) DEFAULT 'JOGADOR 2'");
+      await safeAddColumn("stream_status", "tennis_sets_a VARCHAR(50) DEFAULT '0'");
+      await safeAddColumn("stream_status", "tennis_sets_b VARCHAR(50) DEFAULT '0'");
+      await safeAddColumn("stream_status", "tennis_games_a INT DEFAULT 0");
+      await safeAddColumn("stream_status", "tennis_games_b INT DEFAULT 0");
+      await safeAddColumn("stream_status", "tennis_points_a VARCHAR(20) DEFAULT '0'");
+      await safeAddColumn("stream_status", "tennis_points_b VARCHAR(20) DEFAULT '0'");
+      await safeAddColumn("stream_status", "tennis_server VARCHAR(20) DEFAULT 'a'");
+      await safeAddColumn("stream_status", "tennis_tiebreak BOOLEAN DEFAULT FALSE");
       await safeAddColumn("stream_status", "timer_seconds INT DEFAULT 0");
       await safeAddColumn("stream_status", "timer_running BOOLEAN DEFAULT FALSE");
       await safeAddColumn("stream_status", "logo_enabled BOOLEAN DEFAULT FALSE");
@@ -453,6 +486,7 @@ export const writeSportsFiles = (status: any) => {
       fs.renameSync(tmpPath, targetPath);
     };
 
+    // Futebol / Geral
     writeAtomic("teama.txt", (status?.team_a_name || "TIME A").toUpperCase());
     writeAtomic("teamb.txt", (status?.team_b_name || "TIME B").toUpperCase());
     writeAtomic("scorea.txt", String(status?.score_a ?? 0));
@@ -461,6 +495,17 @@ export const writeSportsFiles = (status: any) => {
     const secs = (status?.timer_seconds || 0) % 60;
     const timeStr = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
     writeAtomic("timer.txt", timeStr);
+
+    // Tênis / Beach Tennis
+    writeAtomic("tennis_player_a.txt", (status?.tennis_player_a || "JOGADOR 1").toUpperCase());
+    writeAtomic("tennis_player_b.txt", (status?.tennis_player_b || "JOGADOR 2").toUpperCase());
+    writeAtomic("tennis_sets_a.txt", String(status?.tennis_sets_a ?? "0"));
+    writeAtomic("tennis_sets_b.txt", String(status?.tennis_sets_b ?? "0"));
+    writeAtomic("tennis_games_a.txt", String(status?.tennis_games_a ?? 0));
+    writeAtomic("tennis_games_b.txt", String(status?.tennis_games_b ?? 0));
+    writeAtomic("tennis_points_a.txt", String(status?.tennis_points_a ?? "0"));
+    writeAtomic("tennis_points_b.txt", String(status?.tennis_points_b ?? "0"));
+    writeAtomic("tennis_server.txt", status?.tennis_server === 'b' ? "B" : (status?.tennis_server === 'none' ? "" : "A"));
   } catch (err) {
     console.error("Erro ao gravar arquivos do painel esportivo:", err);
   }
@@ -492,11 +537,22 @@ export const saveDb = (data: AppDatabase) => {
             system_domain = ?,
             loop_video = ?,
             scoreboard_enabled = ?,
+            scoreboard_style = ?,
             timer_enabled = ?,
             team_a_name = ?,
             team_b_name = ?,
             score_a = ?,
             score_b = ?,
+            tennis_player_a = ?,
+            tennis_player_b = ?,
+            tennis_sets_a = ?,
+            tennis_sets_b = ?,
+            tennis_games_a = ?,
+            tennis_games_b = ?,
+            tennis_points_a = ?,
+            tennis_points_b = ?,
+            tennis_server = ?,
+            tennis_tiebreak = ?,
             timer_seconds = ?,
             timer_running = ?,
             logo_enabled = ?,
@@ -516,11 +572,22 @@ export const saveDb = (data: AppDatabase) => {
           s.system_domain || '',
           s.loop_video ? 1 : 0,
           s.scoreboard_enabled ? 1 : 0,
+          s.scoreboard_style || 'soccer',
           s.timer_enabled ? 1 : 0,
           s.team_a_name || 'TIME A',
           s.team_b_name || 'TIME B',
           s.score_a || 0,
           s.score_b || 0,
+          s.tennis_player_a || 'JOGADOR 1',
+          s.tennis_player_b || 'JOGADOR 2',
+          s.tennis_sets_a || '0',
+          s.tennis_sets_b || '0',
+          s.tennis_games_a || 0,
+          s.tennis_games_b || 0,
+          s.tennis_points_a || '0',
+          s.tennis_points_b || '0',
+          s.tennis_server || 'a',
+          s.tennis_tiebreak ? 1 : 0,
           s.timer_seconds || 0,
           s.timer_running ? 1 : 0,
           s.logo_enabled ? 1 : 0,

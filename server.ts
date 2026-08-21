@@ -257,6 +257,21 @@ async function startServer() {
     claimedAt: null
   };
 
+  // Webcam / Local Stream Host (Primary Computer for Webcam / Screen Capture) State
+  interface WebcamHostInfo {
+    socketId: string | null;
+    username: string | null;
+    deviceName: string | null;
+    claimedAt: number | null;
+  }
+
+  let currentWebcamHost: WebcamHostInfo = {
+    socketId: null,
+    username: null,
+    deviceName: null,
+    claimedAt: null
+  };
+
   // Server-side connection error logging
   io.on("connection_error", (err) => {
     console.error("Erro de conexão Socket.io no servidor:", err.message);
@@ -267,6 +282,7 @@ async function startServer() {
     console.log("Cliente conectado:", socket.id, "Transporte:", socket.conn.transport.name);
     socket.emit("stream_status", getDb().stream_status);
     socket.emit("audio_host_update", currentAudioHost);
+    socket.emit("webcam_host_update", currentWebcamHost);
     
     // Enviar logs existentes para o novo cliente
     ffmpegLogs.forEach(log => socket.emit("ffmpeg_log", log));
@@ -297,7 +313,47 @@ async function startServer() {
       }
     });
 
-    socket.on("web_data", (data) => {
+    socket.on("claim_webcam_host", (data: { deviceName?: string; username?: string }) => {
+      const username = data?.username || "Operador";
+      const deviceName = data?.deviceName || "Computador Principal";
+      currentWebcamHost = {
+        socketId: socket.id,
+        username,
+        deviceName,
+        claimedAt: Date.now()
+      };
+      console.log(`[WEBCAM-HOST] ${socket.id} (${username} - ${deviceName}) assumiu o controle principal da webcam/vídeo local`);
+      io.emit("webcam_host_update", currentWebcamHost);
+    });
+
+    socket.on("release_webcam_host", () => {
+      if (currentWebcamHost.socketId === socket.id) {
+        console.log(`[WEBCAM-HOST] ${socket.id} liberou o controle da webcam`);
+        currentWebcamHost = {
+          socketId: null,
+          username: null,
+          deviceName: null,
+          claimedAt: null
+        };
+        io.emit("webcam_host_update", currentWebcamHost);
+      }
+    });
+
+    socket.on("web_data", (data, metadata) => {
+      // Webcam host exclusivity: only the designated webcam host transmits web/webcam video chunks
+      if (!currentWebcamHost.socketId) {
+        currentWebcamHost = {
+          socketId: socket.id,
+          username: metadata?.username || "Operador",
+          deviceName: metadata?.deviceName || "Computador Ativo",
+          claimedAt: Date.now()
+        };
+        io.emit("webcam_host_update", currentWebcamHost);
+      } else if (currentWebcamHost.socketId !== socket.id) {
+        // Drop data from secondary computer to prevent video stream corruption/collisions
+        return;
+      }
+
       const isAlive = ffmpegProcess && !ffmpegProcess.killed && ffmpegProcess.exitCode === null;
       if (isAlive && ffmpegProcess!.stdin && ffmpegProcess!.stdin.writable) {
         try {
@@ -400,6 +456,17 @@ async function startServer() {
           claimedAt: null
         };
         io.emit("audio_host_update", currentAudioHost);
+      }
+
+      if (currentWebcamHost.socketId === socket.id) {
+        console.log(`[WEBCAM-HOST] Host desconectado (${socket.id}). Liberando controle da webcam/transmissão local.`);
+        currentWebcamHost = {
+          socketId: null,
+          username: null,
+          deviceName: null,
+          claimedAt: null
+        };
+        io.emit("webcam_host_update", currentWebcamHost);
       }
     });
   });
@@ -994,19 +1061,56 @@ async function startServer() {
         const teamBFile = escFFmpeg(path.resolve(cwd, "teamb.txt"));
         const timerFile = escFFmpeg(path.resolve(cwd, "timer.txt"));
 
+        const playerAFile = escFFmpeg(path.resolve(cwd, "tennis_player_a.txt"));
+        const playerBFile = escFFmpeg(path.resolve(cwd, "tennis_player_b.txt"));
+        const setsAFile = escFFmpeg(path.resolve(cwd, "tennis_sets_a.txt"));
+        const setsBFile = escFFmpeg(path.resolve(cwd, "tennis_sets_b.txt"));
+        const gamesAFile = escFFmpeg(path.resolve(cwd, "tennis_games_a.txt"));
+        const gamesBFile = escFFmpeg(path.resolve(cwd, "tennis_games_b.txt"));
+        const pointsAFile = escFFmpeg(path.resolve(cwd, "tennis_points_a.txt"));
+        const pointsBFile = escFFmpeg(path.resolve(cwd, "tennis_points_b.txt"));
+
         if (db.stream_status.scoreboard_enabled) {
-          videoFilters.push("drawbox=x=40:y=40:w=320:h=42:color=black@0.85:t=fill");
-          videoFilters.push("drawbox=x=40:y=40:w=4:h=42:color=0xEAB308:t=fill");
-          videoFilters.push(`drawtext=textfile='${teamAFile}':reload=1:x=75:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
-          videoFilters.push(`drawtext=textfile='${scoreAFile}':reload=1:x=160:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
-          videoFilters.push(`drawtext=text='-':x=198:y=52:fontcolor=white@0.4:fontsize=16${fontFileOpt}`);
-          videoFilters.push(`drawtext=textfile='${scoreBFile}':reload=1:x=224:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
-          videoFilters.push(`drawtext=textfile='${teamBFile}':reload=1:x=265:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
+          if (db.stream_status.scoreboard_style === 'tennis') {
+            // Estilo Tênis / Beach Tennis Scorebug (2 linhas: Jogador 1 / Jogador 2 + Sets + Games/Pontos)
+            // Linha 1 (Jogador A)
+            videoFilters.push("drawbox=x=40:y=40:w=330:h=28:color=black@0.9:t=fill");
+            videoFilters.push("drawbox=x=246:y=40:w=36:h=28:color=white:t=fill");
+            videoFilters.push("drawbox=x=284:y=40:w=44:h=28:color=0xEAB308:t=fill");
+            videoFilters.push(`drawtext=textfile='${playerAFile}':reload=1:x=54:y=47:fontcolor=white:fontsize=13${fontFileOpt}`);
+            videoFilters.push(`drawtext=textfile='${setsAFile}':reload=1:x=258:y=46:fontcolor=black:fontsize=15${fontFileOpt}`);
+            videoFilters.push(`drawtext=textfile='${pointsAFile}':reload=1:x=296:y=46:fontcolor=black:fontsize=15${fontFileOpt}`);
+
+            // Linha 2 (Jogador B)
+            videoFilters.push("drawbox=x=40:y=69:w=330:h=28:color=black@0.9:t=fill");
+            videoFilters.push("drawbox=x=246:y=69:w=36:h=28:color=white:t=fill");
+            videoFilters.push("drawbox=x=284:y=69:w=44:h=28:color=0xEAB308:t=fill");
+            videoFilters.push(`drawtext=textfile='${playerBFile}':reload=1:x=54:y=76:fontcolor=white:fontsize=13${fontFileOpt}`);
+            videoFilters.push(`drawtext=textfile='${setsBFile}':reload=1:x=258:y=75:fontcolor=black:fontsize=15${fontFileOpt}`);
+            videoFilters.push(`drawtext=textfile='${pointsBFile}':reload=1:x=296:y=75:fontcolor=black:fontsize=15${fontFileOpt}`);
+
+            // Barra amarela de destaque na base do scorebug
+            videoFilters.push("drawbox=x=40:y=98:w=330:h=3:color=0xEAB308:t=fill");
+          } else {
+            // Estilo Futebol / Padrão
+            videoFilters.push("drawbox=x=40:y=40:w=320:h=42:color=black@0.85:t=fill");
+            videoFilters.push("drawbox=x=40:y=40:w=4:h=42:color=0xEAB308:t=fill");
+            videoFilters.push(`drawtext=textfile='${teamAFile}':reload=1:x=75:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
+            videoFilters.push(`drawtext=textfile='${scoreAFile}':reload=1:x=160:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
+            videoFilters.push(`drawtext=text='-':x=198:y=52:fontcolor=white@0.4:fontsize=16${fontFileOpt}`);
+            videoFilters.push(`drawtext=textfile='${scoreBFile}':reload=1:x=224:y=50:fontcolor=white:fontsize=18:box=1:boxcolor=white@0.12:boxborderw=4${fontFileOpt}`);
+            videoFilters.push(`drawtext=textfile='${teamBFile}':reload=1:x=265:y=52:fontcolor=white:fontsize=15${fontFileOpt}`);
+          }
         }
         if (db.stream_status.timer_enabled) {
           if (db.stream_status.scoreboard_enabled) {
-            videoFilters.push("drawbox=x=366:y=40:w=80:h=42:color=0xEAB308:t=fill");
-            videoFilters.push(`drawtext=textfile='${timerFile}':reload=1:x=384:y=52:fontcolor=black:fontsize=16${fontFileOpt}`);
+            if (db.stream_status.scoreboard_style === 'tennis') {
+              videoFilters.push("drawbox=x=374:y=40:w=76:h=61:color=0xEAB308:t=fill");
+              videoFilters.push(`drawtext=textfile='${timerFile}':reload=1:x=387:y=62:fontcolor=black:fontsize=15${fontFileOpt}`);
+            } else {
+              videoFilters.push("drawbox=x=366:y=40:w=80:h=42:color=0xEAB308:t=fill");
+              videoFilters.push(`drawtext=textfile='${timerFile}':reload=1:x=384:y=52:fontcolor=black:fontsize=16${fontFileOpt}`);
+            }
           } else {
             videoFilters.push("drawbox=x=40:y=40:w=90:h=42:color=0xEAB308:t=fill");
             videoFilters.push(`drawtext=textfile='${timerFile}':reload=1:x=63:y=52:fontcolor=black:fontsize=17${fontFileOpt}`);
@@ -1212,10 +1316,23 @@ async function startServer() {
   };
 
   // Binary data endpoint for Web Local streaming
-  app.post("/api/stream/web-data", authenticate, express.raw({ type: 'application/octet-stream', limit: '20mb' }), (req, res) => {
+  app.post("/api/stream/web-data", authenticate, express.raw({ type: 'application/octet-stream', limit: '20mb' }), (req: any, res) => {
     const db = getDb();
     const isAlive = ffmpegProcess && !ffmpegProcess.killed && ffmpegProcess.exitCode === null;
     
+    // Check webcam host exclusivity
+    if (!currentWebcamHost.socketId) {
+      currentWebcamHost = {
+        socketId: "api_claim",
+        username: req.user?.username || "Operador",
+        deviceName: "Computador Principal (POST)",
+        claimedAt: Date.now()
+      };
+      io.emit("webcam_host_update", currentWebcamHost);
+    } else if (currentWebcamHost.socketId !== "api_claim" && currentWebcamHost.username && currentWebcamHost.username !== req.user?.username) {
+      return res.status(403).send("Outro computador está designado como transmissor principal de vídeo");
+    }
+
     if (Math.random() < 0.05) {
       console.log(`[SERVER] Recebido chunk POST: ${req.body?.length || 0} bytes. FFmpeg: ${isAlive}, Type: ${db.stream_status.current_source_type}`);
     }
@@ -1334,6 +1451,34 @@ async function startServer() {
     };
     io.emit("audio_host_update", currentAudioHost);
     res.json({ success: true, host: currentAudioHost });
+  });
+
+  // Webcam Host Endpoints
+  app.get("/api/webcam-host", authenticate, (req, res) => {
+    res.json(currentWebcamHost);
+  });
+
+  app.post("/api/webcam-host/claim", authenticate, (req: any, res) => {
+    const { deviceName, socketId } = req.body;
+    currentWebcamHost = {
+      socketId: socketId || currentWebcamHost.socketId || "api_claim",
+      username: req.user?.username || "Operador",
+      deviceName: deviceName || "Computador Principal",
+      claimedAt: Date.now()
+    };
+    io.emit("webcam_host_update", currentWebcamHost);
+    res.json({ success: true, host: currentWebcamHost });
+  });
+
+  app.post("/api/webcam-host/release", authenticate, (req, res) => {
+    currentWebcamHost = {
+      socketId: null,
+      username: null,
+      deviceName: null,
+      claimedAt: null
+    };
+    io.emit("webcam_host_update", currentWebcamHost);
+    res.json({ success: true, host: currentWebcamHost });
   });
 
   // Users Management Endpoints
@@ -1935,25 +2080,48 @@ async function startServer() {
   app.post("/api/status/sports", authenticate, (req, res) => {
     const { 
       scoreboard_enabled, 
+      scoreboard_style,
       timer_enabled, 
       team_a_name, 
       team_b_name, 
       score_a, 
       score_b, 
+      tennis_player_a,
+      tennis_player_b,
+      tennis_sets_a,
+      tennis_sets_b,
+      tennis_games_a,
+      tennis_games_b,
+      tennis_points_a,
+      tennis_points_b,
+      tennis_server,
+      tennis_tiebreak,
       timer_seconds, 
       timer_running 
     } = req.body;
     
     const db = getDb();
     const wasScoreboardEnabled = db.stream_status.scoreboard_enabled;
+    const wasScoreboardStyle = db.stream_status.scoreboard_style || 'soccer';
     const wasTimerEnabled = db.stream_status.timer_enabled;
     
     if (scoreboard_enabled !== undefined) db.stream_status.scoreboard_enabled = scoreboard_enabled;
+    if (scoreboard_style !== undefined) db.stream_status.scoreboard_style = scoreboard_style;
     if (timer_enabled !== undefined) db.stream_status.timer_enabled = timer_enabled;
     if (team_a_name !== undefined) db.stream_status.team_a_name = team_a_name;
     if (team_b_name !== undefined) db.stream_status.team_b_name = team_b_name;
     if (score_a !== undefined) db.stream_status.score_a = score_a;
     if (score_b !== undefined) db.stream_status.score_b = score_b;
+    if (tennis_player_a !== undefined) db.stream_status.tennis_player_a = tennis_player_a;
+    if (tennis_player_b !== undefined) db.stream_status.tennis_player_b = tennis_player_b;
+    if (tennis_sets_a !== undefined) db.stream_status.tennis_sets_a = tennis_sets_a;
+    if (tennis_sets_b !== undefined) db.stream_status.tennis_sets_b = tennis_sets_b;
+    if (tennis_games_a !== undefined) db.stream_status.tennis_games_a = tennis_games_a;
+    if (tennis_games_b !== undefined) db.stream_status.tennis_games_b = tennis_games_b;
+    if (tennis_points_a !== undefined) db.stream_status.tennis_points_a = tennis_points_a;
+    if (tennis_points_b !== undefined) db.stream_status.tennis_points_b = tennis_points_b;
+    if (tennis_server !== undefined) db.stream_status.tennis_server = tennis_server;
+    if (tennis_tiebreak !== undefined) db.stream_status.tennis_tiebreak = tennis_tiebreak;
     if (timer_seconds !== undefined) db.stream_status.timer_seconds = timer_seconds;
     if (timer_running !== undefined) db.stream_status.timer_running = timer_running;
     
@@ -1961,10 +2129,13 @@ async function startServer() {
     writeSportsFiles(db.stream_status);
     saveDb(db);
     
-    // Check if we need to restart the active stream because we toggled scoreboard/timer enabling state
+    // Check if we need to restart the active stream because we toggled scoreboard/timer enabling state or scoreboard style
     let needsRestart = false;
     if (db.stream_status.is_streaming && (db.stream_status.current_source_type === "camera" || db.stream_status.current_source_type === "video")) {
       if (scoreboard_enabled !== undefined && scoreboard_enabled !== wasScoreboardEnabled) {
+        needsRestart = true;
+      }
+      if (scoreboard_style !== undefined && scoreboard_style !== wasScoreboardStyle) {
         needsRestart = true;
       }
       if (timer_enabled !== undefined && timer_enabled !== wasTimerEnabled) {
@@ -1973,7 +2144,7 @@ async function startServer() {
     }
     
     if (needsRestart && (db.stream_status.current_source_type === "camera" || db.stream_status.current_source_type === "video" || db.stream_status.current_source_type === "web")) {
-      console.log("[SERVER] Reiniciando transmissão devido a alteraçao dos filtros de overlay");
+      console.log("[SERVER] Reiniciando transmissão devido a alteração dos filtros de overlay esportivo");
       startStream(db.stream_status.current_source_type, db.stream_status.current_source_id);
     }
     

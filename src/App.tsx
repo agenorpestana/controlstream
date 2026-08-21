@@ -55,6 +55,13 @@ export interface AudioHostInfo {
   claimedAt: number | null;
 }
 
+export interface WebcamHostInfo {
+  socketId: string | null;
+  username: string | null;
+  deviceName: string | null;
+  claimedAt: number | null;
+}
+
 interface StreamStatus {
   current_source_type: 'camera' | 'video' | 'web' | 'none';
   current_source_id: number | string | null;
@@ -63,11 +70,22 @@ interface StreamStatus {
   system_domain?: string;
   loop_video: boolean;
   scoreboard_enabled?: boolean;
+  scoreboard_style?: 'soccer' | 'tennis';
   timer_enabled?: boolean;
   team_a_name?: string;
   team_b_name?: string;
   score_a?: number;
   score_b?: number;
+  tennis_player_a?: string;
+  tennis_player_b?: string;
+  tennis_sets_a?: string;
+  tennis_sets_b?: string;
+  tennis_games_a?: number;
+  tennis_games_b?: number;
+  tennis_points_a?: string;
+  tennis_points_b?: string;
+  tennis_server?: 'a' | 'b' | 'none';
+  tennis_tiebreak?: boolean;
   timer_seconds?: number;
   timer_running?: boolean;
   logo_enabled?: boolean;
@@ -289,6 +307,8 @@ export default function App() {
 
   // Audio Host (Primary Computer for Audio Capture) State
   const [audioHost, setAudioHost] = useState<AudioHostInfo | null>(null);
+  // Webcam Host (Primary Computer for Webcam / Video Capture) State
+  const [webcamHost, setWebcamHost] = useState<WebcamHostInfo | null>(null);
   const [deviceName, setDeviceName] = useState(() => {
     const saved = localStorage.getItem('stream_device_name');
     if (saved) return saved;
@@ -357,7 +377,7 @@ export default function App() {
     // Prefer Socket.io if connected. Direct binary transfer is extremely fast & smooth!
     if (socketConnected && socketRef.current && socketRef.current.connected) {
       try {
-        socketRef.current.emit("web_data", buffer);
+        socketRef.current.emit("web_data", buffer, { deviceName, username: currentUser?.username });
         
         // Success! Remove from queue and schedule next
         chunkQueueRef.current.shift();
@@ -439,10 +459,23 @@ export default function App() {
 
   // Sports Overlay States
   const [isScoreboardEnabled, setIsScoreboardEnabled] = useState(false);
+  const [scoreboardStyle, setScoreboardStyle] = useState<'soccer' | 'tennis'>('soccer');
   const [teamAName, setTeamAName] = useState('TIME A');
   const [teamBName, setTeamBName] = useState('TIME B');
   const [scoreA, setScoreA] = useState(0);
   const [scoreB, setScoreB] = useState(0);
+
+  // Tennis / Beach Tennis states
+  const [tennisPlayerA, setTennisPlayerA] = useState('JOGADOR 1');
+  const [tennisPlayerB, setTennisPlayerB] = useState('JOGADOR 2');
+  const [tennisSetsA, setTennisSetsA] = useState('0');
+  const [tennisSetsB, setTennisSetsB] = useState('0');
+  const [tennisGamesA, setTennisGamesA] = useState(0);
+  const [tennisGamesB, setTennisGamesB] = useState(0);
+  const [tennisPointsA, setTennisPointsA] = useState('0');
+  const [tennisPointsB, setTennisPointsB] = useState('0');
+  const [tennisServer, setTennisServer] = useState<'a' | 'b' | 'none'>('a');
+  const [tennisTiebreak, setTennisTiebreak] = useState(false);
   
   const [isTimerEnabled, setIsTimerEnabled] = useState(false);
   const [timerSeconds, setTimerSeconds] = useState(0);
@@ -450,38 +483,80 @@ export default function App() {
 
   // Sync refs so compositor loop can read instantly without dependency cycle
   const scoreboardEnabledRef = useRef(false);
+  const scoreboardStyleRef = useRef<'soccer' | 'tennis'>('soccer');
   const teamANameRef = useRef('TIME A');
   const teamBNameRef = useRef('TIME B');
   const scoreARef = useRef(0);
   const scoreBRef = useRef(0);
+  const tennisPlayerARef = useRef('JOGADOR 1');
+  const tennisPlayerBRef = useRef('JOGADOR 2');
+  const tennisSetsARef = useRef('0');
+  const tennisSetsBRef = useRef('0');
+  const tennisGamesARef = useRef(0);
+  const tennisGamesBRef = useRef(0);
+  const tennisPointsARef = useRef('0');
+  const tennisPointsBRef = useRef('0');
+  const tennisServerRef = useRef<'a' | 'b' | 'none'>('a');
   const timerEnabledRef = useRef(false);
   const timerSecondsRef = useRef(0);
 
   useEffect(() => { scoreboardEnabledRef.current = isScoreboardEnabled; }, [isScoreboardEnabled]);
+  useEffect(() => { scoreboardStyleRef.current = scoreboardStyle; }, [scoreboardStyle]);
   useEffect(() => { teamANameRef.current = teamAName; }, [teamAName]);
   useEffect(() => { teamBNameRef.current = teamBName; }, [teamBName]);
   useEffect(() => { scoreARef.current = scoreA; }, [scoreA]);
   useEffect(() => { scoreBRef.current = scoreB; }, [scoreB]);
+  useEffect(() => { tennisPlayerARef.current = tennisPlayerA; }, [tennisPlayerA]);
+  useEffect(() => { tennisPlayerBRef.current = tennisPlayerB; }, [tennisPlayerB]);
+  useEffect(() => { tennisSetsARef.current = tennisSetsA; }, [tennisSetsA]);
+  useEffect(() => { tennisSetsBRef.current = tennisSetsB; }, [tennisSetsB]);
+  useEffect(() => { tennisGamesARef.current = tennisGamesA; }, [tennisGamesA]);
+  useEffect(() => { tennisGamesBRef.current = tennisGamesB; }, [tennisGamesB]);
+  useEffect(() => { tennisPointsARef.current = tennisPointsA; }, [tennisPointsA]);
+  useEffect(() => { tennisPointsBRef.current = tennisPointsB; }, [tennisPointsB]);
+  useEffect(() => { tennisServerRef.current = tennisServer; }, [tennisServer]);
   useEffect(() => { timerEnabledRef.current = isTimerEnabled; }, [isTimerEnabled]);
   useEffect(() => { timerSecondsRef.current = timerSeconds; }, [timerSeconds]);
 
   const updateSportsState = async (updates: Partial<{
     scoreboard_enabled: boolean;
+    scoreboard_style: 'soccer' | 'tennis';
     timer_enabled: boolean;
     team_a_name: string;
     team_b_name: string;
     score_a: number;
     score_b: number;
+    tennis_player_a: string;
+    tennis_player_b: string;
+    tennis_sets_a: string;
+    tennis_sets_b: string;
+    tennis_games_a: number;
+    tennis_games_b: number;
+    tennis_points_a: string;
+    tennis_points_b: string;
+    tennis_server: 'a' | 'b' | 'none';
+    tennis_tiebreak: boolean;
     timer_seconds: number;
     timer_running: boolean;
   }>) => {
     // Optimistic UI updates
     if (updates.scoreboard_enabled !== undefined) setIsScoreboardEnabled(updates.scoreboard_enabled);
+    if (updates.scoreboard_style !== undefined) setScoreboardStyle(updates.scoreboard_style);
     if (updates.timer_enabled !== undefined) setIsTimerEnabled(updates.timer_enabled);
     if (updates.team_a_name !== undefined) setTeamAName(updates.team_a_name);
     if (updates.team_b_name !== undefined) setTeamBName(updates.team_b_name);
     if (updates.score_a !== undefined) setScoreA(updates.score_a);
     if (updates.score_b !== undefined) setScoreB(updates.score_b);
+    if (updates.tennis_player_a !== undefined) setTennisPlayerA(updates.tennis_player_a);
+    if (updates.tennis_player_b !== undefined) setTennisPlayerB(updates.tennis_player_b);
+    if (updates.tennis_sets_a !== undefined) setTennisSetsA(updates.tennis_sets_a);
+    if (updates.tennis_sets_b !== undefined) setTennisSetsB(updates.tennis_sets_b);
+    if (updates.tennis_games_a !== undefined) setTennisGamesA(updates.tennis_games_a);
+    if (updates.tennis_games_b !== undefined) setTennisGamesB(updates.tennis_games_b);
+    if (updates.tennis_points_a !== undefined) setTennisPointsA(updates.tennis_points_a);
+    if (updates.tennis_points_b !== undefined) setTennisPointsB(updates.tennis_points_b);
+    if (updates.tennis_server !== undefined) setTennisServer(updates.tennis_server);
+    if (updates.tennis_tiebreak !== undefined) setTennisTiebreak(updates.tennis_tiebreak);
     if (updates.timer_seconds !== undefined) setTimerSeconds(updates.timer_seconds);
     if (updates.timer_running !== undefined) setIsTimerRunning(updates.timer_running);
 
@@ -497,6 +572,112 @@ export default function App() {
       });
     } catch (e) {
       console.error("Erro ao sincronizar placar esportivo com o servidor:", e);
+    }
+  };
+
+  // Tennis score point increment helper
+  const addTennisPoint = (target: 'a' | 'b') => {
+    if (tennisTiebreak) {
+      const currentPts = parseInt(target === 'a' ? tennisPointsA : tennisPointsB, 10) || 0;
+      const otherPts = parseInt(target === 'a' ? tennisPointsB : tennisPointsA, 10) || 0;
+      const nextPts = currentPts + 1;
+      
+      // Check tiebreak win (7+ points with 2 points lead)
+      if (nextPts >= 7 && (nextPts - otherPts) >= 2) {
+        // Set won!
+        if (target === 'a') {
+          const setsA = (parseInt(tennisSetsA, 10) || 0) + 1;
+          updateSportsState({
+            tennis_sets_a: String(setsA),
+            tennis_games_a: 0,
+            tennis_games_b: 0,
+            tennis_points_a: '0',
+            tennis_points_b: '0',
+            tennis_tiebreak: false
+          });
+        } else {
+          const setsB = (parseInt(tennisSetsB, 10) || 0) + 1;
+          updateSportsState({
+            tennis_sets_b: String(setsB),
+            tennis_games_a: 0,
+            tennis_games_b: 0,
+            tennis_points_a: '0',
+            tennis_points_b: '0',
+            tennis_tiebreak: false
+          });
+        }
+      } else {
+        if (target === 'a') {
+          updateSportsState({ tennis_points_a: String(nextPts) });
+        } else {
+          updateSportsState({ tennis_points_b: String(nextPts) });
+        }
+      }
+      return;
+    }
+
+    const standardSteps = ['0', '15', '30', '40'];
+    const pA = tennisPointsA;
+    const pB = tennisPointsB;
+
+    if (target === 'a') {
+      if (pA === '0') updateSportsState({ tennis_points_a: '15' });
+      else if (pA === '15') updateSportsState({ tennis_points_a: '30' });
+      else if (pA === '30') updateSportsState({ tennis_points_a: '40' });
+      else if (pA === '40') {
+        if (pB === '40') {
+          updateSportsState({ tennis_points_a: 'AD' });
+        } else if (pB === 'AD') {
+          updateSportsState({ tennis_points_b: '40' }); // Back to deuce
+        } else {
+          // Game won!
+          const newGames = tennisGamesA + 1;
+          updateSportsState({
+            tennis_games_a: newGames,
+            tennis_points_a: '0',
+            tennis_points_b: '0',
+            tennis_server: tennisServer === 'a' ? 'b' : (tennisServer === 'b' ? 'a' : 'a')
+          });
+        }
+      } else if (pA === 'AD') {
+        // Game won!
+        const newGames = tennisGamesA + 1;
+        updateSportsState({
+          tennis_games_a: newGames,
+          tennis_points_a: '0',
+          tennis_points_b: '0',
+          tennis_server: tennisServer === 'a' ? 'b' : (tennisServer === 'b' ? 'a' : 'a')
+        });
+      }
+    } else {
+      if (pB === '0') updateSportsState({ tennis_points_b: '15' });
+      else if (pB === '15') updateSportsState({ tennis_points_b: '30' });
+      else if (pB === '30') updateSportsState({ tennis_points_b: '40' });
+      else if (pB === '40') {
+        if (pA === '40') {
+          updateSportsState({ tennis_points_b: 'AD' });
+        } else if (pA === 'AD') {
+          updateSportsState({ tennis_points_a: '40' }); // Back to deuce
+        } else {
+          // Game won!
+          const newGames = tennisGamesB + 1;
+          updateSportsState({
+            tennis_games_b: newGames,
+            tennis_points_a: '0',
+            tennis_points_b: '0',
+            tennis_server: tennisServer === 'a' ? 'b' : (tennisServer === 'b' ? 'a' : 'a')
+          });
+        }
+      } else if (pB === 'AD') {
+        // Game won!
+        const newGames = tennisGamesB + 1;
+        updateSportsState({
+          tennis_games_b: newGames,
+          tennis_points_a: '0',
+          tennis_points_b: '0',
+          tennis_server: tennisServer === 'a' ? 'b' : (tennisServer === 'b' ? 'a' : 'a')
+        });
+      }
     }
   };
 
@@ -946,13 +1127,24 @@ export default function App() {
         const isTyping = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
         
         if (newStatus.scoreboard_enabled !== undefined) setIsScoreboardEnabled(newStatus.scoreboard_enabled);
+        if (newStatus.scoreboard_style !== undefined) setScoreboardStyle(newStatus.scoreboard_style);
         if (newStatus.timer_enabled !== undefined) setIsTimerEnabled(newStatus.timer_enabled);
         if (!isTyping) {
           if (newStatus.team_a_name !== undefined) setTeamAName(newStatus.team_a_name || 'TIME A');
           if (newStatus.team_b_name !== undefined) setTeamBName(newStatus.team_b_name || 'TIME B');
+          if (newStatus.tennis_player_a !== undefined) setTennisPlayerA(newStatus.tennis_player_a || 'JOGADOR 1');
+          if (newStatus.tennis_player_b !== undefined) setTennisPlayerB(newStatus.tennis_player_b || 'JOGADOR 2');
         }
         if (newStatus.score_a !== undefined) setScoreA(newStatus.score_a);
         if (newStatus.score_b !== undefined) setScoreB(newStatus.score_b);
+        if (newStatus.tennis_sets_a !== undefined) setTennisSetsA(newStatus.tennis_sets_a);
+        if (newStatus.tennis_sets_b !== undefined) setTennisSetsB(newStatus.tennis_sets_b);
+        if (newStatus.tennis_games_a !== undefined) setTennisGamesA(newStatus.tennis_games_a);
+        if (newStatus.tennis_games_b !== undefined) setTennisGamesB(newStatus.tennis_games_b);
+        if (newStatus.tennis_points_a !== undefined) setTennisPointsA(newStatus.tennis_points_a);
+        if (newStatus.tennis_points_b !== undefined) setTennisPointsB(newStatus.tennis_points_b);
+        if (newStatus.tennis_server !== undefined) setTennisServer(newStatus.tennis_server);
+        if (newStatus.tennis_tiebreak !== undefined) setTennisTiebreak(newStatus.tennis_tiebreak);
         if (newStatus.timer_seconds !== undefined) setTimerSeconds(newStatus.timer_seconds);
         if (newStatus.timer_running !== undefined) setIsTimerRunning(newStatus.timer_running);
 
@@ -976,6 +1168,10 @@ export default function App() {
 
       socket.on('audio_host_update', (host: AudioHostInfo) => {
         setAudioHost(host);
+      });
+
+      socket.on('webcam_host_update', (host: WebcamHostInfo) => {
+        setWebcamHost(host);
       });
 
       socket.on('ffmpeg_log', (log: string) => {
@@ -1188,14 +1384,15 @@ export default function App() {
     const headers = { Authorization: `Bearer ${token}` };
 
     try {
-      const [camsRes, vidsRes, statusRes, logosRes, meRes, usersRes, hostRes] = await Promise.all([
+      const [camsRes, vidsRes, statusRes, logosRes, meRes, usersRes, hostRes, webcamHostRes] = await Promise.all([
         fetch('/api/cameras', { headers }),
         fetch('/api/videos', { headers }),
         fetch('/api/status', { headers }),
         fetch('/api/logos', { headers }),
         fetch('/api/me', { headers }).catch(() => null),
         fetch('/api/users', { headers }).catch(() => null),
-        fetch('/api/audio-host', { headers }).catch(() => null)
+        fetch('/api/audio-host', { headers }).catch(() => null),
+        fetch('/api/webcam-host', { headers }).catch(() => null)
       ]);
       
       if (camsRes.status === 401 || vidsRes.status === 401 || statusRes.status === 401 || logosRes.status === 401) {
@@ -1219,6 +1416,11 @@ export default function App() {
       if (hostRes && hostRes.ok) {
         const hData = await hostRes.json();
         setAudioHost(hData);
+      }
+
+      if (webcamHostRes && webcamHostRes.ok) {
+        const whData = await webcamHostRes.json();
+        setWebcamHost(whData);
       }
 
       if (camsRes.ok) {
@@ -1246,11 +1448,22 @@ export default function App() {
 
         // Map scoreboard/timer states from server
         if (s.scoreboard_enabled !== undefined) setIsScoreboardEnabled(s.scoreboard_enabled);
+        if (s.scoreboard_style !== undefined) setScoreboardStyle(s.scoreboard_style);
         if (s.timer_enabled !== undefined) setIsTimerEnabled(s.timer_enabled);
         if (s.team_a_name !== undefined) setTeamAName(s.team_a_name);
         if (s.team_b_name !== undefined) setTeamBName(s.team_b_name);
         if (s.score_a !== undefined) setScoreA(s.score_a);
         if (s.score_b !== undefined) setScoreB(s.score_b);
+        if (s.tennis_player_a !== undefined) setTennisPlayerA(s.tennis_player_a);
+        if (s.tennis_player_b !== undefined) setTennisPlayerB(s.tennis_player_b);
+        if (s.tennis_sets_a !== undefined) setTennisSetsA(s.tennis_sets_a);
+        if (s.tennis_sets_b !== undefined) setTennisSetsB(s.tennis_sets_b);
+        if (s.tennis_games_a !== undefined) setTennisGamesA(s.tennis_games_a);
+        if (s.tennis_games_b !== undefined) setTennisGamesB(s.tennis_games_b);
+        if (s.tennis_points_a !== undefined) setTennisPointsA(s.tennis_points_a);
+        if (s.tennis_points_b !== undefined) setTennisPointsB(s.tennis_points_b);
+        if (s.tennis_server !== undefined) setTennisServer(s.tennis_server);
+        if (s.tennis_tiebreak !== undefined) setTennisTiebreak(s.tennis_tiebreak);
         if (s.timer_seconds !== undefined) setTimerSeconds(s.timer_seconds);
         if (s.timer_running !== undefined) setIsTimerRunning(s.timer_running);
 
@@ -1562,6 +1775,11 @@ export default function App() {
   const startWebBroadcast = async () => {
     if (!canvasRef.current) return;
     
+    // Auto-claim webcam host if this PC is broadcasting
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit("claim_webcam_host", { deviceName, username: currentUser?.username });
+    }
+
     // Resume AudioContext on user gesture
     const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
     if (ctx.state === 'suspended') await ctx.resume();
@@ -1571,6 +1789,11 @@ export default function App() {
   };
 
   const switchToLocalCamera = async () => {
+    // Auto-claim webcam host
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit("claim_webcam_host", { deviceName, username: currentUser?.username });
+    }
+
     let activeStream = cameraStream;
     if (!activeStream) {
       try {
@@ -2060,6 +2283,37 @@ export default function App() {
     }
   };
 
+  // Webcam Host Controls
+  const claimWebcamHost = async () => {
+    const dName = deviceName || 'Computador Operador';
+    const uName = currentUser?.username || 'Operador';
+    
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit("claim_webcam_host", { deviceName: dName, username: uName });
+    } else {
+      const token = localStorage.getItem('token');
+      await fetch('/api/webcam-host/claim', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ deviceName: dName, username: uName })
+      });
+      fetchData();
+    }
+  };
+
+  const releaseWebcamHost = async () => {
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit("release_webcam_host");
+    } else {
+      const token = localStorage.getItem('token');
+      await fetch('/api/webcam-host/release', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      fetchData();
+    }
+  };
+
   // User Management Handlers
   const openAddUserModal = () => {
     setEditingUser(null);
@@ -2220,6 +2474,7 @@ export default function App() {
   }, [currentUser, availableTabs, activeTab]);
 
   const isThisDeviceAudioHost = !audioHost?.socketId || audioHost.socketId === socketRef.current?.id;
+  const isThisDeviceWebcamHost = !webcamHost?.socketId || webcamHost.socketId === socketRef.current?.id;
 
   if (!isLoggedIn) {
     return (
@@ -2415,6 +2670,43 @@ export default function App() {
                       onClick={claimAudioHost}
                       className="ml-1 px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-black font-bold rounded-lg text-[10px] uppercase tracking-tight transition-all cursor-pointer shadow-sm"
                       title="Tornar este computador o transmissor oficial de microfone"
+                    >
+                      Tornar Principal
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Indicador e Controle de Computador Principal de Webcam */}
+            {(status?.current_source_type === 'web' || cameraStream || isLocalStreaming || webcamHost?.socketId) && (
+              <div className="relative">
+                {isThisDeviceWebcamHost ? (
+                  <div className="flex items-center gap-2 bg-purple-500/15 border border-purple-500/40 text-purple-300 px-3.5 py-2 rounded-2xl shadow-sm">
+                    <Camera size={16} className="text-purple-400 shrink-0" />
+                    <div className="flex flex-col">
+                      <span className="text-xs font-bold font-mono leading-tight">Webcam: Principal (Este PC)</span>
+                      <span className="text-[9px] text-purple-400/70 font-mono leading-tight">Câmera ativa para transmissão</span>
+                    </div>
+                    <button
+                      onClick={releaseWebcamHost}
+                      className="ml-1 px-2 py-0.5 bg-purple-500/30 hover:bg-purple-500/50 rounded-lg text-[10px] font-bold text-purple-200 transition-colors cursor-pointer"
+                      title="Liberar controle de webcam para outro computador assumir"
+                    >
+                      Liberar
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2.5 bg-amber-500/15 border border-amber-500/40 text-amber-300 px-3.5 py-2 rounded-2xl shadow-sm">
+                    <Camera size={16} className="text-amber-400 shrink-0" />
+                    <div className="flex flex-col">
+                      <span className="text-[11px] font-bold font-mono leading-tight">Webcam: {webcamHost?.deviceName || 'Outro PC'}</span>
+                      <span className="text-[9px] text-amber-300/60 leading-tight">Câmera bloqueada neste PC</span>
+                    </div>
+                    <button
+                      onClick={claimWebcamHost}
+                      className="ml-1 px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-black font-bold rounded-lg text-[10px] uppercase tracking-tight transition-all cursor-pointer shadow-sm"
+                      title="Tornar este computador o transmissor oficial da webcam"
                     >
                       Tornar Principal
                     </button>
@@ -2691,32 +2983,81 @@ export default function App() {
 
                         {/* Sports Overlay (Placar e Cronômetro) */}
                         {(isScoreboardEnabled || isTimerEnabled) && (
-                          <div className="absolute top-4 left-4 z-40 flex items-center select-none scale-[0.3] sm:scale-[0.38] md:scale-[0.45] lg:scale-[0.5] origin-top-left pointer-events-none drop-shadow-lg font-sans">
+                          <div className="absolute top-4 left-4 z-40 flex items-start select-none scale-[0.35] sm:scale-[0.45] md:scale-[0.55] lg:scale-[0.65] origin-top-left pointer-events-none drop-shadow-2xl font-sans">
                             {isScoreboardEnabled && (
-                              <div className="flex bg-[#0f1117]/95 border-l-4 border-amber-500 rounded-l-md px-4 py-2 h-[42px] items-center gap-3 w-[280px] sm:w-[320px] md:w-[360px] justify-between">
-                                {/* Team A */}
-                                <span className="text-white font-bold text-xs md:text-sm tracking-wide uppercase truncate text-right flex-1 select-none pr-1">
-                                  {teamAName || "TIME A"}
-                                </span>
-                                {/* Score A Box */}
-                                <div className="bg-white/10 rounded px-2 md:px-2.5 py-0.5 min-w-[28px] md:min-w-[32px] text-center font-mono font-extrabold text-white text-xs md:text-base select-none">
-                                  {scoreA}
+                              scoreboardStyle === 'tennis' ? (
+                                /* Tennis / Beach Tennis Scorebug (2 Linhas como overlays.uno) */
+                                <div className="flex flex-col bg-[#0b0c10]/95 rounded-lg border border-white/15 overflow-hidden shadow-2xl min-w-[280px]">
+                                  {/* Player A Row */}
+                                  <div className="flex items-center h-[34px] border-b border-white/10">
+                                    <div className="flex-1 px-3 flex items-center gap-2 overflow-hidden">
+                                      {tennisServer === 'a' && (
+                                        <div className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse shrink-0 shadow-[0_0_8px_rgba(251,191,36,0.8)]" title="Sacando" />
+                                      )}
+                                      <span className="text-white font-black text-sm tracking-wider uppercase truncate">
+                                        {tennisPlayerA || "JOGADOR 1"}
+                                      </span>
+                                    </div>
+                                    {/* Sets A */}
+                                    <div className="w-10 h-full bg-white text-black font-black text-base flex items-center justify-center border-l border-white/20">
+                                      {tennisSetsA}
+                                    </div>
+                                    {/* Games / Points A */}
+                                    <div className="w-12 h-full bg-amber-500 text-black font-black text-base flex items-center justify-center border-l border-amber-600">
+                                      {tennisPointsA}
+                                    </div>
+                                  </div>
+
+                                  {/* Player B Row */}
+                                  <div className="flex items-center h-[34px]">
+                                    <div className="flex-1 px-3 flex items-center gap-2 overflow-hidden">
+                                      {tennisServer === 'b' && (
+                                        <div className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse shrink-0 shadow-[0_0_8px_rgba(251,191,36,0.8)]" title="Sacando" />
+                                      )}
+                                      <span className="text-white font-black text-sm tracking-wider uppercase truncate">
+                                        {tennisPlayerB || "JOGADOR 2"}
+                                      </span>
+                                    </div>
+                                    {/* Sets B */}
+                                    <div className="w-10 h-full bg-white text-black font-black text-base flex items-center justify-center border-l border-white/20">
+                                      {tennisSetsB}
+                                    </div>
+                                    {/* Games / Points B */}
+                                    <div className="w-12 h-full bg-amber-500 text-black font-black text-base flex items-center justify-center border-l border-amber-600">
+                                      {tennisPointsB}
+                                    </div>
+                                  </div>
+                                  
+                                  {/* Amber Accent Base Line */}
+                                  <div className="h-1 w-full bg-amber-500" />
                                 </div>
-                                {/* Divider */}
-                                <div className="h-5 w-[1px] bg-white/20 select-none" />
-                                {/* Score B Box */}
-                                <div className="bg-white/10 rounded px-2 md:px-2.5 py-0.5 min-w-[28px] md:min-w-[32px] text-center font-mono font-extrabold text-white text-xs md:text-base select-none">
-                                  {scoreB}
+                              ) : (
+                                /* Futebol / Geral (1 Linha) */
+                                <div className="flex bg-[#0f1117]/95 border-l-4 border-amber-500 rounded-l-md px-4 py-2 h-[42px] items-center gap-3 w-[280px] sm:w-[320px] md:w-[360px] justify-between">
+                                  {/* Team A */}
+                                  <span className="text-white font-bold text-xs md:text-sm tracking-wide uppercase truncate text-right flex-1 select-none pr-1">
+                                    {teamAName || "TIME A"}
+                                  </span>
+                                  {/* Score A Box */}
+                                  <div className="bg-white/10 rounded px-2 md:px-2.5 py-0.5 min-w-[28px] md:min-w-[32px] text-center font-mono font-extrabold text-white text-xs md:text-base select-none">
+                                    {scoreA}
+                                  </div>
+                                  {/* Divider */}
+                                  <div className="h-5 w-[1px] bg-white/20 select-none" />
+                                  {/* Score B Box */}
+                                  <div className="bg-white/10 rounded px-2 md:px-2.5 py-0.5 min-w-[28px] md:min-w-[32px] text-center font-mono font-extrabold text-white text-xs md:text-base select-none">
+                                    {scoreB}
+                                  </div>
+                                  {/* Team B */}
+                                  <span className="text-white font-bold text-xs md:text-sm tracking-wide uppercase truncate text-left flex-1 select-none pl-1">
+                                    {teamBName || "TIME B"}
+                                  </span>
                                 </div>
-                                {/* Team B */}
-                                <span className="text-white font-bold text-xs md:text-sm tracking-wide uppercase truncate text-left flex-1 select-none pl-1">
-                                  {teamBName || "TIME B"}
-                                </span>
-                              </div>
+                              )
                             )}
 
                             {isTimerEnabled && (
-                              <div className={`font-mono font-extrabold text-xs md:text-base px-3 md:px-4 py-2 h-[42px] flex items-center justify-center min-w-[65px] md:min-w-[80px] text-black bg-amber-500 ${isScoreboardEnabled ? 'rounded-r-md' : 'rounded-md'}`}>
+                              <div className={`font-mono font-extrabold text-xs md:text-base px-3 md:px-4 py-2 ${scoreboardStyle === 'tennis' && isScoreboardEnabled ? 'h-[73px] ml-1 rounded-lg' : 'h-[42px] ' + (isScoreboardEnabled ? 'rounded-r-md' : 'rounded-md')} flex items-center justify-center min-w-[65px] md:min-w-[80px] text-black bg-amber-500`}>
                                 {String(Math.floor(timerSeconds / 60)).padStart(2, '0')}:{String(timerSeconds % 60).padStart(2, '0')}
                               </div>
                             )}
@@ -2962,10 +3303,36 @@ export default function App() {
                       </button>
                     </div>
 
-                    {/* Configuração de Times & Pontuação */}
+                    {/* Seletor de Modelo de Placar (Futebol vs Tênis Scorebug) */}
                     {isScoreboardEnabled && (
-                      <div className="space-y-4 pt-4 border-t border-white/5 animate-fade-in">
-                        <h4 className="text-xs font-mono uppercase tracking-wider text-white/40">Configurações do Placar</h4>
+                      <div className="space-y-3 pt-4 border-t border-white/5 animate-fade-in">
+                        <div className="flex items-center justify-between">
+                          <label className="text-[10px] font-mono uppercase tracking-wider text-white/40">Estilo do Placar</label>
+                          <span className="text-[10px] font-bold text-amber-500 bg-amber-500/10 px-2 py-0.5 rounded">
+                            {scoreboardStyle === 'tennis' ? 'Tênis Scorebug' : 'Futebol Padrão'}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 p-1 bg-black/40 rounded-xl border border-white/5">
+                          <button
+                            onClick={() => updateSportsState({ scoreboard_style: 'soccer' })}
+                            className={`py-2 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 ${scoreboardStyle === 'soccer' ? 'bg-amber-500 text-black shadow-md' : 'text-white/60 hover:text-white hover:bg-white/5'}`}
+                          >
+                            <span>⚽ Futebol / Geral</span>
+                          </button>
+                          <button
+                            onClick={() => updateSportsState({ scoreboard_style: 'tennis' })}
+                            className={`py-2 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 ${scoreboardStyle === 'tennis' ? 'bg-amber-500 text-black shadow-md' : 'text-white/60 hover:text-white hover:bg-white/5'}`}
+                          >
+                            <span>🎾 Tênis Scorebug</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Controles para Modelo: FUTEBOL / GERAL */}
+                    {isScoreboardEnabled && scoreboardStyle === 'soccer' && (
+                      <div className="space-y-4 pt-2 animate-fade-in">
+                        <h4 className="text-xs font-mono uppercase tracking-wider text-white/40">Configurações de Futebol / Geral</h4>
                         
                         <div className="grid grid-cols-2 gap-4">
                           {/* TIME A */}
@@ -3041,6 +3408,224 @@ export default function App() {
                               </button>
                             </div>
                           </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Controles para Modelo: TÊNIS / BEACH TENNIS (SCOREBUG) */}
+                    {isScoreboardEnabled && scoreboardStyle === 'tennis' && (
+                      <div className="space-y-4 pt-2 animate-fade-in">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-mono uppercase tracking-wider text-white/40">Controles de Tênis</h4>
+                          <button
+                            onClick={() => updateSportsState({ tennis_tiebreak: !tennisTiebreak })}
+                            className={`text-[10px] font-bold px-2 py-0.5 rounded transition-all flex items-center gap-1 ${tennisTiebreak ? 'bg-amber-500 text-black' : 'bg-white/10 text-white/60 hover:text-white'}`}
+                          >
+                            <span>Tie-break:</span>
+                            <span>{tennisTiebreak ? 'ON' : 'OFF'}</span>
+                          </button>
+                        </div>
+
+                        {/* Botões Rápidos de Ponto (+PONTO) */}
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            onClick={() => addTennisPoint('a')}
+                            className="py-2.5 px-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-lg active:scale-95 transition-all"
+                          >
+                            <Trophy size={14} />
+                            <span>+ Ponto {tennisPlayerA.split(' ')[0]}</span>
+                          </button>
+                          <button
+                            onClick={() => addTennisPoint('b')}
+                            className="py-2.5 px-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-lg active:scale-95 transition-all"
+                          >
+                            <Trophy size={14} />
+                            <span>+ Ponto {tennisPlayerB.split(' ')[0]}</span>
+                          </button>
+                        </div>
+
+                        {/* Card Jogador A */}
+                        <div className="bg-black/30 rounded-2xl p-3.5 border border-white/10 space-y-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex-1">
+                              <label className="block text-[10px] font-mono text-white/40 uppercase mb-1">Jogador / Dupla A</label>
+                              <input
+                                type="text"
+                                value={tennisPlayerA}
+                                onChange={(e) => setTennisPlayerA(e.target.value)}
+                                onBlur={() => updateSportsState({ tennis_player_a: tennisPlayerA })}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    updateSportsState({ tennis_player_a: tennisPlayerA });
+                                    (e.target as HTMLInputElement).blur();
+                                  }
+                                }}
+                                className="w-full bg-black/50 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-amber-500 font-bold"
+                                placeholder="JOGADOR 1"
+                              />
+                            </div>
+                            <button
+                              onClick={() => updateSportsState({ tennis_server: tennisServer === 'a' ? 'none' : 'a' })}
+                              className={`self-end px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 shrink-0 ${tennisServer === 'a' ? 'bg-amber-400 text-black ring-2 ring-amber-400/50' : 'bg-white/5 text-white/40 hover:text-white'}`}
+                              title="Indicar que este jogador está no saque"
+                            >
+                              <span>🎾</span>
+                              <span>{tennisServer === 'a' ? 'Sacando' : 'Saque'}</span>
+                            </button>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3 pt-1">
+                            {/* Sets A */}
+                            <div className="bg-black/40 rounded-xl p-2 border border-white/5 flex items-center justify-between">
+                              <span className="text-[10px] font-mono text-white/40 uppercase">Sets</span>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  onClick={() => {
+                                    const val = Math.max(0, (parseInt(tennisSetsA, 10) || 0) - 1);
+                                    updateSportsState({ tennis_sets_a: String(val) });
+                                  }}
+                                  className="w-6 h-6 rounded bg-white/5 hover:bg-white/10 text-white flex items-center justify-center font-bold text-xs"
+                                >
+                                  -
+                                </button>
+                                <span className="font-mono text-sm font-extrabold text-white min-w-[16px] text-center">{tennisSetsA}</span>
+                                <button
+                                  onClick={() => {
+                                    const val = (parseInt(tennisSetsA, 10) || 0) + 1;
+                                    updateSportsState({ tennis_sets_a: String(val) });
+                                  }}
+                                  className="w-6 h-6 rounded bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 flex items-center justify-center font-bold text-xs"
+                                >
+                                  +
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Pontos A / Games A */}
+                            <div className="bg-black/40 rounded-xl p-2 border border-white/5 flex items-center justify-between">
+                              <span className="text-[10px] font-mono text-white/40 uppercase">Ptos</span>
+                              <span className="font-mono text-sm font-extrabold text-amber-400 px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">{tennisPointsA}</span>
+                            </div>
+                          </div>
+
+                          {/* Seletor rápido de pontuação para Jogador A */}
+                          <div className="flex items-center gap-1 pt-1">
+                            {['0', '15', '30', '40', 'AD'].map((pt) => (
+                              <button
+                                key={pt}
+                                onClick={() => updateSportsState({ tennis_points_a: pt })}
+                                className={`flex-1 py-1 rounded text-[11px] font-mono font-bold transition-all ${tennisPointsA === pt ? 'bg-amber-500 text-black' : 'bg-white/5 text-white/70 hover:bg-white/10'}`}
+                              >
+                                {pt}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Card Jogador B */}
+                        <div className="bg-black/30 rounded-2xl p-3.5 border border-white/10 space-y-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex-1">
+                              <label className="block text-[10px] font-mono text-white/40 uppercase mb-1">Jogador / Dupla B</label>
+                              <input
+                                type="text"
+                                value={tennisPlayerB}
+                                onChange={(e) => setTennisPlayerB(e.target.value)}
+                                onBlur={() => updateSportsState({ tennis_player_b: tennisPlayerB })}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    updateSportsState({ tennis_player_b: tennisPlayerB });
+                                    (e.target as HTMLInputElement).blur();
+                                  }
+                                }}
+                                className="w-full bg-black/50 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-amber-500 font-bold"
+                                placeholder="JOGADOR 2"
+                              />
+                            </div>
+                            <button
+                              onClick={() => updateSportsState({ tennis_server: tennisServer === 'b' ? 'none' : 'b' })}
+                              className={`self-end px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 shrink-0 ${tennisServer === 'b' ? 'bg-amber-400 text-black ring-2 ring-amber-400/50' : 'bg-white/5 text-white/40 hover:text-white'}`}
+                              title="Indicar que este jogador está no saque"
+                            >
+                              <span>🎾</span>
+                              <span>{tennisServer === 'b' ? 'Sacando' : 'Saque'}</span>
+                            </button>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3 pt-1">
+                            {/* Sets B */}
+                            <div className="bg-black/40 rounded-xl p-2 border border-white/5 flex items-center justify-between">
+                              <span className="text-[10px] font-mono text-white/40 uppercase">Sets</span>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  onClick={() => {
+                                    const val = Math.max(0, (parseInt(tennisSetsB, 10) || 0) - 1);
+                                    updateSportsState({ tennis_sets_b: String(val) });
+                                  }}
+                                  className="w-6 h-6 rounded bg-white/5 hover:bg-white/10 text-white flex items-center justify-center font-bold text-xs"
+                                >
+                                  -
+                                </button>
+                                <span className="font-mono text-sm font-extrabold text-white min-w-[16px] text-center">{tennisSetsB}</span>
+                                <button
+                                  onClick={() => {
+                                    const val = (parseInt(tennisSetsB, 10) || 0) + 1;
+                                    updateSportsState({ tennis_sets_b: String(val) });
+                                  }}
+                                  className="w-6 h-6 rounded bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 flex items-center justify-center font-bold text-xs"
+                                >
+                                  +
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Pontos B / Games B */}
+                            <div className="bg-black/40 rounded-xl p-2 border border-white/5 flex items-center justify-between">
+                              <span className="text-[10px] font-mono text-white/40 uppercase">Ptos</span>
+                              <span className="font-mono text-sm font-extrabold text-amber-400 px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">{tennisPointsB}</span>
+                            </div>
+                          </div>
+
+                          {/* Seletor rápido de pontuação para Jogador B */}
+                          <div className="flex items-center gap-1 pt-1">
+                            {['0', '15', '30', '40', 'AD'].map((pt) => (
+                              <button
+                                key={pt}
+                                onClick={() => updateSportsState({ tennis_points_b: pt })}
+                                className={`flex-1 py-1 rounded text-[11px] font-mono font-bold transition-all ${tennisPointsB === pt ? 'bg-amber-500 text-black' : 'bg-white/5 text-white/70 hover:bg-white/10'}`}
+                              >
+                                {pt}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Botões de Ação Rápida de Tênis */}
+                        <div className="grid grid-cols-2 gap-2 pt-1">
+                          <button
+                            onClick={() => updateSportsState({ tennis_points_a: '0', tennis_points_b: '0' })}
+                            className="py-1.5 px-3 rounded-lg bg-white/5 hover:bg-white/10 text-white/70 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all"
+                          >
+                            <RotateCcw size={12} />
+                            <span>Zerar Pontos</span>
+                          </button>
+                          <button
+                            onClick={() => {
+                              updateSportsState({
+                                tennis_sets_a: '0',
+                                tennis_sets_b: '0',
+                                tennis_games_a: 0,
+                                tennis_games_b: 0,
+                                tennis_points_a: '0',
+                                tennis_points_b: '0',
+                                tennis_tiebreak: false
+                              });
+                            }}
+                            className="py-1.5 px-3 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all"
+                          >
+                            <RotateCcw size={12} />
+                            <span>Zerar Jogo</span>
+                          </button>
                         </div>
                       </div>
                     )}
@@ -4029,6 +4614,48 @@ export default function App() {
               exit={{ opacity: 0, y: -20 }}
               className="space-y-6"
             >
+              {/* Banner de Controle de Computador Principal para Câmera / Tela */}
+              <div className="bg-[#151619] rounded-2xl border border-white/10 p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 rounded-xl bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                    <Laptop size={20} />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-bold text-white">Computador Transmissor:</span>
+                      <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded ${isThisDeviceWebcamHost ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30' : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'}`}>
+                        {isThisDeviceWebcamHost ? 'Este Computador (Principal)' : (webcamHost?.deviceName || 'Outro Dispositivo')}
+                      </span>
+                    </div>
+                    <p className="text-xs text-white/40 mt-0.5">
+                      {isThisDeviceWebcamHost 
+                        ? 'Este PC está autorizado a transmitir sua tela e câmera ao vivo.' 
+                        : 'Apenas o computador principal envia sinal de vídeo ao YouTube para evitar conflitos.'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  {isThisDeviceWebcamHost ? (
+                    <button
+                      type="button"
+                      onClick={releaseWebcamHost}
+                      className="px-3.5 py-2 bg-white/5 hover:bg-white/10 text-white/70 hover:text-white rounded-xl text-xs font-bold transition-all border border-white/10 cursor-pointer"
+                    >
+                      Liberar Controle
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={claimWebcamHost}
+                      className="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-purple-500/20 cursor-pointer"
+                    >
+                      Tornar Este PC Principal
+                    </button>
+                  )}
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 <div className="lg:col-span-2 space-y-6">
                   <div className="bg-[#151619] rounded-3xl border border-white/10 overflow-hidden">
@@ -4493,6 +5120,89 @@ export default function App() {
                               type="button"
                               onClick={claimAudioHost}
                               className="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-emerald-500/20 cursor-pointer"
+                            >
+                              Definir Este PC Como Principal
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Controle de Computador Principal da Webcam (Multi-Operador) */}
+                  <div className="p-6 bg-[#151619] rounded-3xl border border-white/10 shadow-2xl space-y-6">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="p-3 bg-purple-500/10 rounded-2xl text-purple-400">
+                          <Camera size={22} />
+                        </div>
+                        <div>
+                          <h3 className="font-bold text-lg">Computador Principal da Webcam (Multi-Operador)</h3>
+                          <p className="text-xs text-white/40">Evita que dois computadores tentem transmitir webcam ao mesmo tempo</p>
+                        </div>
+                      </div>
+
+                      {isThisDeviceWebcamHost ? (
+                        <span className="px-3 py-1 bg-purple-500/20 text-purple-400 border border-purple-500/30 rounded-full text-xs font-mono font-bold">
+                          ESTE PC É O PRINCIPAL
+                        </span>
+                      ) : (
+                        <span className="px-3 py-1 bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-full text-xs font-mono font-bold">
+                          WEBCAM BLOQUEADA NESTE PC
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="p-4 bg-black/30 rounded-2xl border border-white/5 space-y-3">
+                        <label className="block text-xs font-mono uppercase text-white/40">Nome deste Computador / Dispositivo</label>
+                        <div className="flex gap-2">
+                          <input 
+                            type="text"
+                            value={deviceName}
+                            onChange={(e) => {
+                              setDeviceName(e.target.value);
+                              localStorage.setItem('stream_device_name', e.target.value);
+                            }}
+                            className="flex-1 bg-black/50 border border-white/10 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-purple-500"
+                            placeholder="Ex: Notebook Transmissão 01"
+                          />
+                        </div>
+                        <p className="text-[11px] text-white/40">
+                          Identifica este dispositivo para os outros computadores conectados na rede.
+                        </p>
+                      </div>
+
+                      <div className="p-4 bg-black/30 rounded-2xl border border-white/5 flex flex-col justify-between">
+                        <div>
+                          <span className="block text-xs font-mono uppercase text-white/40">Dispositivo Transmissor de Webcam Atual</span>
+                          <div className="flex items-center gap-2 mt-1">
+                            <Camera size={16} className={webcamHost?.socketId ? 'text-purple-400' : 'text-white/40'} />
+                            <span className="text-sm font-bold text-white">
+                              {webcamHost?.deviceName || 'Nenhum computador fixado (Qualquer um pode transmitir)'}
+                            </span>
+                          </div>
+                          {webcamHost?.username && (
+                            <span className="text-[11px] text-white/40 font-mono block mt-0.5">
+                              Operador: {webcamHost.username}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="mt-4 flex gap-2">
+                          {isThisDeviceWebcamHost ? (
+                            <button
+                              type="button"
+                              onClick={releaseWebcamHost}
+                              className="px-4 py-2 bg-white/10 hover:bg-white/15 text-white/80 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                            >
+                              Liberar Controle de Webcam
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={claimWebcamHost}
+                              className="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-purple-500/20 cursor-pointer"
                             >
                               Definir Este PC Como Principal
                             </button>
