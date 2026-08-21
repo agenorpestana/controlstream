@@ -67,11 +67,11 @@ interface StreamStatus {
 const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
   const [error, setError] = useState(false);
-  // Start with empty imgSrc so the initial HTML page load completes immediately without Chrome spinner hanging
-  const [imgSrc, setImgSrc] = useState<string>('');
+  const [imgSrc, setImgSrc] = useState<string>(() => `/api/cameras/${camId}/mjpeg?token=${token}&_t=${Date.now()}`);
   const [snapshotSrc] = useState<string>(() => `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const isMountedRef = useRef(true);
+  const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const reloadStream = () => {
     if (!isMountedRef.current) return;
@@ -81,19 +81,12 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
 
   useEffect(() => {
     isMountedRef.current = true;
-    
-    // Attach stream slightly after initial render to avoid hanging window.onload
-    const timer = setTimeout(() => {
-      if (isMountedRef.current) {
-        reloadStream();
-      }
-    }, 200);
+    reloadStream();
 
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
         reloadStream();
       } else {
-        // Detach stream while in another tab so browser sockets and server FFmpeg are freed
         if (imgRef.current) {
           imgRef.current.src = '';
         }
@@ -110,7 +103,7 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
     window.addEventListener('focus', handleWindowFocus);
 
     return () => {
-      clearTimeout(timer);
+      if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
       isMountedRef.current = false;
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('focus', handleWindowFocus);
@@ -123,6 +116,18 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
 
   const handleManualRetry = () => {
     reloadStream();
+  };
+
+  const handleImgError = () => {
+    if (!isMountedRef.current) return;
+    setError(true);
+    // Automatic retry after 2 seconds in case stream was interrupted during switch
+    if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
+    retryTimeoutRef.current = setTimeout(() => {
+      if (isMountedRef.current) {
+        reloadStream();
+      }
+    }, 2000);
   };
 
   return (
@@ -153,10 +158,7 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
         src={imgSrc} 
         alt={`Camera ${camId}`}
         className="relative z-[1] w-full h-full object-contain"
-        onError={() => {
-          if (!isMountedRef.current) return;
-          setError(true);
-        }}
+        onError={handleImgError}
       />
     </div>
   );

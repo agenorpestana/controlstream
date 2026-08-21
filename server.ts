@@ -448,9 +448,189 @@ async function startServer() {
 
   let isStarting = false;
   let activeProbeProc: any = null;
-  let activeHighQualityMjpegProc: any = null;
-  let activeHighQualityCamId: number | null = null;
   const camAudioCache: Record<number | string, boolean> = {};
+
+  // Broadcaster Multiplexer for Camera MJPEG streams
+  // Avoids opening multiple concurrent RTSP connections to the same physical camera
+  class CameraMjpegBroadcaster {
+    camId: number;
+    rtspUrl: string;
+    clients: Set<express.Response>;
+    ffmpegProc: ChildProcess | null = null;
+    idleTimer: NodeJS.Timeout | null = null;
+    restartTimer: NodeJS.Timeout | null = null;
+    isStarting: boolean = false;
+
+    constructor(camId: number, rtspUrl: string) {
+      this.camId = camId;
+      this.rtspUrl = rtspUrl;
+      this.clients = new Set();
+    }
+
+    updateUrl(newUrl: string) {
+      if (this.rtspUrl !== newUrl) {
+        this.rtspUrl = newUrl;
+        if (this.ffmpegProc) {
+          this.stopFfmpeg();
+          if (this.clients.size > 0) {
+            this.startFfmpeg();
+          }
+        }
+      }
+    }
+
+    isRunning(): boolean {
+      return Boolean(this.ffmpegProc && !this.ffmpegProc.killed && this.ffmpegProc.exitCode === null);
+    }
+
+    addClient(res: express.Response) {
+      if (this.idleTimer) {
+        clearTimeout(this.idleTimer);
+        this.idleTimer = null;
+      }
+
+      res.writeHead(200, {
+        "Content-Type": "multipart/x-mixed-replace; boundary=ffmpeg",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Connection": "close",
+        "Pragma": "no-cache",
+        "X-Accel-Buffering": "no"
+      });
+
+      this.clients.add(res);
+
+      if (!this.ffmpegProc && !this.isStarting) {
+        this.startFfmpeg();
+      }
+
+      const remove = () => {
+        this.clients.delete(res);
+        try {
+          if (!res.writableEnded) res.end();
+        } catch (e) {}
+
+        if (this.clients.size === 0) {
+          if (this.idleTimer) clearTimeout(this.idleTimer);
+          this.idleTimer = setTimeout(() => {
+            if (this.clients.size === 0) {
+              this.stopFfmpeg();
+            }
+          }, 5000);
+        }
+      };
+
+      res.on("close", remove);
+      res.on("finish", remove);
+      res.on("error", remove);
+      if (res.socket) {
+        res.socket.on("close", remove);
+        res.socket.on("error", remove);
+      }
+    }
+
+    startFfmpeg() {
+      if (this.ffmpegProc || this.isStarting || !this.rtspUrl) return;
+      this.isStarting = true;
+
+      const isRtmp = this.rtspUrl && (this.rtspUrl.startsWith("rtmp://") || this.rtspUrl.startsWith("rtmps://"));
+      const transportOpts = isRtmp 
+        ? [] 
+        : ["-rtsp_transport", "tcp", "-stimeout", "5000000", "-flags", "+low_delay"];
+
+      const args = [
+        "-thread_queue_size", "4096",
+        "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
+        "-fpsprobesize", "0",
+        ...transportOpts,
+        "-probesize", "500000",
+        "-analyzeduration", "500000",
+        "-i", this.rtspUrl,
+        "-r", "25",
+        "-vf", "scale=720:-1",
+        "-an",
+        "-c:v", "mjpeg",
+        "-q:v", "4",
+        "-g", "10",
+        "-f", "mpjpeg",
+        "-boundary_tag", "ffmpeg",
+        "-"
+      ];
+
+      const ff = spawn("ffmpeg", args);
+      this.ffmpegProc = ff;
+      this.isStarting = false;
+
+      ff.stdout.on("data", (chunk: Buffer) => {
+        for (const client of Array.from(this.clients)) {
+          if (!client.writableEnded) {
+            try {
+              client.write(chunk);
+            } catch (e) {
+              this.clients.delete(client);
+            }
+          }
+        }
+      });
+
+      ff.on("close", () => {
+        this.ffmpegProc = null;
+        this.isStarting = false;
+        if (this.clients.size > 0) {
+          if (!this.restartTimer) {
+            this.restartTimer = setTimeout(() => {
+              this.restartTimer = null;
+              if (this.clients.size > 0) {
+                this.startFfmpeg();
+              }
+            }, 1000);
+          }
+        }
+      });
+
+      ff.on("error", (err) => {
+        console.error(`[MJPEG-HUB] Erro no FFmpeg da câmera ${this.camId}:`, err?.message || err);
+      });
+    }
+
+    stopFfmpeg() {
+      if (this.restartTimer) {
+        clearTimeout(this.restartTimer);
+        this.restartTimer = null;
+      }
+      if (this.ffmpegProc) {
+        try {
+          this.ffmpegProc.removeAllListeners("close");
+          this.ffmpegProc.removeAllListeners("error");
+          this.ffmpegProc.kill("SIGKILL");
+        } catch (e) {}
+        this.ffmpegProc = null;
+      }
+      this.isStarting = false;
+    }
+
+    destroy() {
+      this.stopFfmpeg();
+      for (const client of this.clients) {
+        try {
+          if (!client.writableEnded) client.end();
+        } catch (e) {}
+      }
+      this.clients.clear();
+    }
+  }
+
+  const cameraBroadcasters: Map<number, CameraMjpegBroadcaster> = new Map();
+
+  function getOrCreateBroadcaster(camId: number, rtspUrl: string): CameraMjpegBroadcaster {
+    let broadcaster = cameraBroadcasters.get(camId);
+    if (!broadcaster) {
+      broadcaster = new CameraMjpegBroadcaster(camId, rtspUrl);
+      cameraBroadcasters.set(camId, broadcaster);
+    } else {
+      broadcaster.updateUrl(rtspUrl);
+    }
+    return broadcaster;
+  }
 
   const probeCameraHasAudio = async (rtspUrl: string, camId: number | string): Promise<boolean> => {
     if (camAudioCache[camId] !== undefined) {
@@ -1262,113 +1442,14 @@ async function startServer() {
     });
   });
 
-  let activeCardMjpegProcs: { [camId: number]: any } = {};
-
   app.get("/api/cameras/:id/mjpeg", authenticate, (req, res) => {
     const db = getDb();
     const camId = parseInt(req.params.id);
     const cam = db.cameras.find((c: any) => c.id === camId);
     if (!cam) return res.status(404).json({ error: "Câmera não encontrada" });
 
-    const isPreview = req.query.quality === "preview";
-
-    // Terminate old active stream for this camera to prevent duplicate FFmpeg processes
-    if (isPreview) {
-      if (activeCardMjpegProcs[camId]) {
-        try { activeCardMjpegProcs[camId].kill("SIGKILL"); } catch (e) {}
-        delete activeCardMjpegProcs[camId];
-      }
-    } else {
-      if (activeHighQualityMjpegProc) {
-        try { activeHighQualityMjpegProc.kill("SIGKILL"); } catch (e) {}
-        activeHighQualityMjpegProc = null;
-        activeHighQualityCamId = null;
-      }
-    }
-
-    res.writeHead(200, {
-      "Content-Type": "multipart/x-mixed-replace; boundary=ffmpeg",
-      "Cache-Control": "no-cache, no-store, must-revalidate",
-      "Connection": "close",
-      "Pragma": "no-cache",
-      "X-Accel-Buffering": "no"
-    });
-
-    const scaleFilter = isPreview ? "scale=540:-1" : "scale=960:-1";
-    const fpsRate = isPreview ? "25" : "30";
-    const qualityVal = isPreview ? "6" : "3";
-
-    const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
-    const transportOpts = isRtmp 
-      ? [] 
-      : ["-rtsp_transport", "tcp", "-stimeout", "5000000", "-flags", "+low_delay"];
-
-    const args = [
-      "-thread_queue_size", "4096",
-      "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
-      "-fpsprobesize", "0",
-      ...transportOpts,
-      "-probesize", "500000",
-      "-analyzeduration", "500000",
-      "-i", cam.rtsp_url,
-      "-r", fpsRate,
-      "-vf", scaleFilter,
-      "-an",
-      "-c:v", "mjpeg",
-      "-q:v", qualityVal,
-      "-g", "10",
-      "-f", "mpjpeg",
-      "-boundary_tag", "ffmpeg",
-      "-"
-    ];
-
-    const ff = spawn("ffmpeg", args);
-    if (isPreview) {
-      activeCardMjpegProcs[camId] = ff;
-    } else {
-      activeHighQualityMjpegProc = ff;
-      activeHighQualityCamId = camId;
-    }
-
-    ff.stdout.pipe(res);
-
-    let killed = false;
-    const cleanup = () => {
-      if (killed) return;
-      killed = true;
-      if (isPreview) {
-        if (activeCardMjpegProcs[camId] === ff) {
-          delete activeCardMjpegProcs[camId];
-        }
-      } else {
-        if (activeHighQualityMjpegProc === ff) {
-          activeHighQualityMjpegProc = null;
-          activeHighQualityCamId = null;
-        }
-      }
-      try {
-        ff.stdout.unpipe(res);
-        ff.kill("SIGKILL");
-      } catch (e) {}
-      try {
-        if (!res.writableEnded) res.end();
-      } catch (e) {}
-    };
-
-    req.on("close", cleanup);
-    req.on("aborted", cleanup);
-    req.on("end", cleanup);
-    req.on("error", cleanup);
-    res.on("close", cleanup);
-    res.on("finish", cleanup);
-    res.on("error", cleanup);
-    if (req.socket) {
-      req.socket.on("close", cleanup);
-      req.socket.on("error", cleanup);
-    }
-    ff.on("close", () => {
-      cleanup();
-    });
+    const broadcaster = getOrCreateBroadcaster(camId, cam.rtsp_url);
+    broadcaster.addClient(res);
   });
 
   // Dedicated Camera Audio Monitoring Endpoint for Local Audio Return / Fones
@@ -1458,6 +1539,10 @@ async function startServer() {
     const camId = parseInt(req.params.id);
     const { name, rtsp_url } = req.body;
     delete camAudioCache[camId];
+    const broadcaster = cameraBroadcasters.get(camId);
+    if (broadcaster && rtsp_url) {
+      broadcaster.updateUrl(rtsp_url);
+    }
     const updated = await dbUpdateCamera(camId, { name, rtsp_url });
     if (!updated) return res.status(404).json({ error: "Câmera não encontrada" });
     io.emit("cameras", getDb().cameras);
@@ -1467,6 +1552,11 @@ async function startServer() {
   app.delete("/api/cameras/:id", authenticate, async (req, res) => {
     const camId = parseInt(req.params.id);
     delete camAudioCache[camId];
+    const broadcaster = cameraBroadcasters.get(camId);
+    if (broadcaster) {
+      broadcaster.destroy();
+      cameraBroadcasters.delete(camId);
+    }
     await dbDeleteCamera(camId);
     io.emit("cameras", getDb().cameras);
     res.json({ success: true });
@@ -1799,7 +1889,7 @@ async function startServer() {
     }
 
     // Se a câmera estiver com preview ativo ou snapshot recente (< 15s)
-    if (camId && activeHighQualityCamId === camId) {
+    if (camId && cameraBroadcasters.get(camId)?.isRunning()) {
       return Promise.resolve(true);
     }
     if (camId && snapshotCaches[camId] && snapshotCaches[camId].data.length > 0 && (Date.now() - snapshotCaches[camId].timestamp < 15000)) {
