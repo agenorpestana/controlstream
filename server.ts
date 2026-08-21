@@ -389,8 +389,13 @@ async function startServer() {
         }
       } else {
         const broadcaster = cameraBroadcasters.get(cId);
-        if (broadcaster?.latestFrame) {
-          socket.emit("cam_frame", { id: cId, frame: broadcaster.latestFrame });
+        if (broadcaster) {
+          if (!broadcaster.isRunning() && !broadcaster.isStarting) {
+            broadcaster.startFfmpeg();
+          }
+          if (broadcaster.latestFrame) {
+            socket.emit("cam_frame", { id: cId, frame: broadcaster.latestFrame });
+          }
         }
       }
     });
@@ -515,9 +520,11 @@ async function startServer() {
     ffmpegProc: ChildProcess | null = null;
     idleTimer: NodeJS.Timeout | null = null;
     restartTimer: NodeJS.Timeout | null = null;
+    watchdogTimer: NodeJS.Timeout | null = null;
     isStarting: boolean = false;
     latestFrame: Buffer | null = null;
     lastSocketEmitTime: number = 0;
+    lastChunkTime: number = Date.now();
 
     constructor(camId: number, rtspUrl: string) {
       this.camId = camId;
@@ -625,6 +632,7 @@ async function startServer() {
     startFfmpeg() {
       if (this.ffmpegProc || this.isStarting || !this.rtspUrl) return;
       this.isStarting = true;
+      this.lastChunkTime = Date.now();
 
       const streamUrl = getInternalStreamUrl(this.rtspUrl);
       const isRtmp = streamUrl && (streamUrl.startsWith("rtmp://") || streamUrl.startsWith("rtmps://"));
@@ -633,6 +641,8 @@ async function startServer() {
         : ["-rtsp_transport", "tcp", "-stimeout", "5000000", "-flags", "+low_delay"];
 
       const args = [
+        "-loglevel", "error",
+        "-nostats",
         "-thread_queue_size", "4096",
         "-fflags", "+nobuffer+genpts+igndts+discardcorrupt",
         "-fpsprobesize", "0",
@@ -655,9 +665,31 @@ async function startServer() {
       this.ffmpegProc = ff;
       this.isStarting = false;
 
+      // Drain stderr to prevent pipe buffer saturation (which causes FFmpeg to freeze after ~3 min)
+      ff.stderr?.on("data", () => {});
+      ff.stderr?.resume();
+
+      // Start stream watchdog to recover from stalled RTSP connections
+      if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+      this.watchdogTimer = setInterval(() => {
+        if (!this.ffmpegProc) {
+          if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+          return;
+        }
+        if (Date.now() - this.lastChunkTime > 8000) {
+          if (this.clients.size > 0 || this.socketSubscribers > 0) {
+            console.warn(`[MJPEG-HUB] Câmera ${this.camId} travou ou sem dados há 8s. Reiniciando processo...`);
+            this.stopFfmpeg();
+            this.startFfmpeg();
+          }
+        }
+      }, 3000);
+
       let accumulator = Buffer.alloc(0);
 
       ff.stdout.on("data", (chunk: Buffer) => {
+        this.lastChunkTime = Date.now();
+
         // Direct stream to HTTP clients
         for (const client of Array.from(this.clients)) {
           if (!client.writableEnded) {
@@ -700,6 +732,10 @@ async function startServer() {
       });
 
       ff.on("close", () => {
+        if (this.watchdogTimer) {
+          clearInterval(this.watchdogTimer);
+          this.watchdogTimer = null;
+        }
         this.ffmpegProc = null;
         this.isStarting = false;
         if (this.clients.size > 0 || this.socketSubscribers > 0) {
@@ -720,6 +756,10 @@ async function startServer() {
     }
 
     stopFfmpeg() {
+      if (this.watchdogTimer) {
+        clearInterval(this.watchdogTimer);
+        this.watchdogTimer = null;
+      }
       if (this.restartTimer) {
         clearTimeout(this.restartTimer);
         this.restartTimer = null;

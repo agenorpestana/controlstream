@@ -124,7 +124,7 @@ const CameraPreview = ({ camId, className = '' }: { camId: number, className?: s
             }
           }
           bmp.close();
-          if (!hasSignal) setHasSignal(true);
+          setHasSignal(true);
         }).catch(() => {});
       } else {
         if (fallbackImgUrlRef.current) {
@@ -135,7 +135,7 @@ const CameraPreview = ({ camId, className = '' }: { camId: number, className?: s
         if (fallbackImgRef.current) {
           fallbackImgRef.current.src = url;
         }
-        if (!hasSignal) setHasSignal(true);
+        setHasSignal(true);
       }
     };
 
@@ -151,7 +151,7 @@ const CameraPreview = ({ camId, className = '' }: { camId: number, className?: s
         URL.revokeObjectURL(fallbackImgUrlRef.current);
       }
     };
-  }, [camId, hasSignal]);
+  }, [camId]);
 
   return (
     <div className={`relative bg-black overflow-hidden flex items-center justify-center ${className}`}>
