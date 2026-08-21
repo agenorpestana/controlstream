@@ -4,6 +4,21 @@ import { motion, AnimatePresence } from 'motion/react';
 import { io } from 'socket.io-client';
 
 // Types
+let sharedSocket: any = null;
+export function getSharedSocket(): any {
+  if (!sharedSocket) {
+    sharedSocket = io(window.location.origin, {
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 20000,
+    });
+  }
+  return sharedSocket;
+}
+
 interface CameraData {
   id: number;
   name: string;
@@ -66,118 +81,114 @@ interface StreamStatus {
 
 const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
-  const [error, setError] = useState(false);
-  const [imgSrc, setImgSrc] = useState<string>('');
-  const imgRef = useRef<HTMLImageElement | null>(null);
+  const [hasSignal, setHasSignal] = useState(false);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const isMountedRef = useRef(true);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
-
-  const fetchNextPreview = () => {
-    if (!isMountedRef.current) return;
-    if (quality === 'high') {
-      setError(false);
-      setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=high&_t=${Date.now()}`);
-    } else {
-      // For cards preview, use snapshot polling so browser HTTP sockets are never exhausted
-      setImgSrc(`/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
-    }
-  };
+  const lastFrameTimeRef = useRef<number>(Date.now());
+  const fallbackImgUrlRef = useRef<string | null>(null);
+  const fallbackImgRef = useRef<HTMLImageElement | null>(null);
 
   useEffect(() => {
     isMountedRef.current = true;
-    setError(false);
-    fetchNextPreview();
+    const socket = getSharedSocket();
 
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        fetchNextPreview();
+    const subscribe = () => {
+      socket.emit('subscribe_cam', camId);
+    };
+
+    subscribe();
+    socket.on('connect', subscribe);
+
+    const handleFrame = (data: { id: number, frame: ArrayBuffer | Uint8Array | Buffer }) => {
+      if (!isMountedRef.current) return;
+      if (data.id !== camId) return;
+
+      lastFrameTimeRef.current = Date.now();
+
+      const blob = new Blob([data.frame], { type: 'image/jpeg' });
+      if (typeof createImageBitmap === 'function') {
+        createImageBitmap(blob).then((bmp) => {
+          if (!isMountedRef.current) {
+            bmp.close();
+            return;
+          }
+          const canvas = canvasRef.current;
+          if (canvas) {
+            if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+              canvas.width = bmp.width;
+              canvas.height = bmp.height;
+            }
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.drawImage(bmp, 0, 0);
+            }
+          }
+          bmp.close();
+          setHasSignal(true);
+        }).catch(() => {});
       } else {
-        if (imgRef.current) {
-          imgRef.current.src = '';
+        if (fallbackImgUrlRef.current) {
+          URL.revokeObjectURL(fallbackImgUrlRef.current);
         }
+        const url = URL.createObjectURL(blob);
+        fallbackImgUrlRef.current = url;
+        if (fallbackImgRef.current) {
+          fallbackImgRef.current.src = url;
+        }
+        setHasSignal(true);
       }
     };
 
-    const handleWindowFocus = () => {
-      if (document.visibilityState === 'visible') {
-        fetchNextPreview();
-      }
-    };
+    socket.on('cam_frame', handleFrame);
 
-    document.addEventListener('visibilitychange', handleVisibility);
-    window.addEventListener('focus', handleWindowFocus);
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastFrameTimeRef.current > 5000) {
+        setHasSignal(false);
+      }
+    }, 2000);
 
     return () => {
       isMountedRef.current = false;
-      if (timerRef.current) clearTimeout(timerRef.current);
-      document.removeEventListener('visibilitychange', handleVisibility);
-      window.removeEventListener('focus', handleWindowFocus);
-      if (imgRef.current) {
-        imgRef.current.src = '';
-        imgRef.current.removeAttribute('src');
+      clearInterval(watchdog);
+      socket.off('connect', subscribe);
+      socket.off('cam_frame', handleFrame);
+      socket.emit('unsubscribe_cam', camId);
+      if (fallbackImgUrlRef.current) {
+        URL.revokeObjectURL(fallbackImgUrlRef.current);
       }
     };
-  }, [camId, quality, token]);
-
-  const handleImgLoad = () => {
-    if (!isMountedRef.current) return;
-    setError(false);
-    if (quality === 'preview') {
-      if (timerRef.current) clearTimeout(timerRef.current);
-      timerRef.current = setTimeout(() => {
-        if (isMountedRef.current) {
-          fetchNextPreview();
-        }
-      }, 1500);
-    }
-  };
-
-  const handleManualRetry = () => {
-    fetchNextPreview();
-  };
-
-  const handleImgError = () => {
-    if (!isMountedRef.current) return;
-    setError(true);
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => {
-      if (isMountedRef.current) {
-        fetchNextPreview();
-      }
-    }, 2500);
-  };
+  }, [camId]);
 
   return (
-    <div className={`relative bg-[#0d0e12] overflow-hidden ${className}`}>
-      {/* Instant Snapshot Base to prevent black screens during connection */}
+    <div className={`relative bg-[#0d0e12] overflow-hidden flex items-center justify-center ${className}`}>
+      {/* Instant Snapshot Base during connection */}
       <img
         src={`/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`}
         alt=""
         aria-hidden="true"
-        className="absolute inset-0 w-full h-full object-contain pointer-events-none opacity-60"
+        className={`absolute inset-0 w-full h-full object-contain pointer-events-none transition-opacity duration-300 ${hasSignal ? 'opacity-0' : 'opacity-60'}`}
         onError={(e) => { (e.target as HTMLElement).style.display = 'none'; }}
       />
 
-      {error && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-black/80 z-10">
-          <p className="text-amber-400 text-[10px] font-bold uppercase mb-2">Conectando Câmera...</p>
-          <button 
-            onClick={handleManualRetry}
-            className="p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors cursor-pointer"
-            title="Recarregar Câmera"
-          >
-            <RefreshCw className="w-4 h-4 text-white animate-spin" />
-          </button>
+      {/* Real-time smooth canvas for 25 FPS live streaming */}
+      <canvas
+        ref={canvasRef}
+        className={`relative z-[1] w-full h-full object-contain transition-opacity duration-200 ${hasSignal ? 'opacity-100' : 'opacity-0'}`}
+      />
+
+      {/* Fallback image if canvas bitmap decoding is unavailable */}
+      <img
+        ref={fallbackImgRef}
+        alt=""
+        className="hidden absolute inset-0 w-full h-full object-contain z-[1]"
+      />
+
+      {!hasSignal && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-black/60 z-10">
+          <RefreshCw className="w-5 h-5 text-emerald-400 animate-spin mb-2" />
+          <p className="text-white/80 text-[11px] font-mono font-medium">Sincronizando sinal ao vivo...</p>
         </div>
       )}
-      <img 
-        ref={imgRef}
-        src={imgSrc} 
-        alt={`Camera ${camId}`}
-        className="relative z-[1] w-full h-full object-contain"
-        onLoad={handleImgLoad}
-        onError={handleImgError}
-      />
     </div>
   );
 };

@@ -373,8 +373,46 @@ async function startServer() {
       }
     });
 
+    const subscribedCams = new Set<number>();
+
+    socket.on("subscribe_cam", (camId: number | string) => {
+      const cId = Number(camId);
+      if (!cId) return;
+      socket.join(`cam_${cId}`);
+      if (!subscribedCams.has(cId)) {
+        subscribedCams.add(cId);
+        const db = getDb();
+        const cam = db.cameras.find((c: any) => c.id === cId);
+        if (cam) {
+          const broadcaster = getOrCreateBroadcaster(cam.id, cam.rtsp_url);
+          broadcaster.addSocketSubscriber();
+        }
+      }
+    });
+
+    socket.on("unsubscribe_cam", (camId: number | string) => {
+      const cId = Number(camId);
+      if (!cId) return;
+      socket.leave(`cam_${cId}`);
+      if (subscribedCams.has(cId)) {
+        subscribedCams.delete(cId);
+        const broadcaster = cameraBroadcasters.get(cId);
+        if (broadcaster) {
+          broadcaster.removeSocketSubscriber();
+        }
+      }
+    });
+
     socket.on("disconnect", () => {
       console.log("Cliente desconectado:", socket.id);
+      for (const cId of Array.from(subscribedCams)) {
+        const broadcaster = cameraBroadcasters.get(cId);
+        if (broadcaster) {
+          broadcaster.removeSocketSubscriber();
+        }
+      }
+      subscribedCams.clear();
+
       if (currentAudioHost.socketId === socket.id) {
         console.log(`[AUDIO-HOST] Host desconectado (${socket.id}). Liberando controle de áudio.`);
         currentAudioHost = {
@@ -468,10 +506,12 @@ async function startServer() {
     camId: number;
     rtspUrl: string;
     clients: Set<express.Response>;
+    socketSubscribers: number = 0;
     ffmpegProc: ChildProcess | null = null;
     idleTimer: NodeJS.Timeout | null = null;
     restartTimer: NodeJS.Timeout | null = null;
     isStarting: boolean = false;
+    latestFrame: Buffer | null = null;
 
     constructor(camId: number, rtspUrl: string) {
       this.camId = camId;
@@ -484,7 +524,7 @@ async function startServer() {
         this.rtspUrl = newUrl;
         if (this.ffmpegProc) {
           this.stopFfmpeg();
-          if (this.clients.size > 0) {
+          if (this.clients.size > 0 || this.socketSubscribers > 0) {
             this.startFfmpeg();
           }
         }
@@ -493,6 +533,25 @@ async function startServer() {
 
     isRunning(): boolean {
       return Boolean(this.ffmpegProc && !this.ffmpegProc.killed && this.ffmpegProc.exitCode === null);
+    }
+
+    addSocketSubscriber() {
+      this.socketSubscribers++;
+      if (this.idleTimer) {
+        clearTimeout(this.idleTimer);
+        this.idleTimer = null;
+      }
+      if (!this.ffmpegProc && !this.isStarting) {
+        this.startFfmpeg();
+      }
+      if (this.latestFrame) {
+        io.to(`cam_${this.camId}`).emit("cam_frame", { id: this.camId, frame: this.latestFrame });
+      }
+    }
+
+    removeSocketSubscriber() {
+      this.socketSubscribers = Math.max(0, this.socketSubscribers - 1);
+      this.checkIdle();
     }
 
     addClient(res: express.Response) {
@@ -520,15 +579,7 @@ async function startServer() {
         try {
           if (!res.writableEnded) res.end();
         } catch (e) {}
-
-        if (this.clients.size === 0) {
-          if (this.idleTimer) clearTimeout(this.idleTimer);
-          this.idleTimer = setTimeout(() => {
-            if (this.clients.size === 0) {
-              this.stopFfmpeg();
-            }
-          }, 5000);
-        }
+        this.checkIdle();
       };
 
       res.on("close", remove);
@@ -537,6 +588,17 @@ async function startServer() {
       if (res.socket) {
         res.socket.on("close", remove);
         res.socket.on("error", remove);
+      }
+    }
+
+    checkIdle() {
+      if (this.clients.size === 0 && this.socketSubscribers === 0) {
+        if (this.idleTimer) clearTimeout(this.idleTimer);
+        this.idleTimer = setTimeout(() => {
+          if (this.clients.size === 0 && this.socketSubscribers === 0) {
+            this.stopFfmpeg();
+          }
+        }, 6000);
       }
     }
 
@@ -573,7 +635,10 @@ async function startServer() {
       this.ffmpegProc = ff;
       this.isStarting = false;
 
+      let accumulator = Buffer.alloc(0);
+
       ff.stdout.on("data", (chunk: Buffer) => {
+        // Direct stream to HTTP clients
         for (const client of Array.from(this.clients)) {
           if (!client.writableEnded) {
             try {
@@ -583,16 +648,43 @@ async function startServer() {
             }
           }
         }
+
+        // Fast JPEG boundary extraction for WebSocket frame broadcast
+        accumulator = Buffer.concat([accumulator, chunk]);
+        while (accumulator.length > 4) {
+          const soi = accumulator.indexOf(Buffer.from([0xff, 0xd8]));
+          if (soi === -1) {
+            if (accumulator.length > 512 * 1024) accumulator = Buffer.alloc(0);
+            break;
+          }
+          const eoi = accumulator.indexOf(Buffer.from([0xff, 0xd9]), soi + 2);
+          if (eoi === -1) {
+            if (soi > 0) {
+              accumulator = accumulator.subarray(soi);
+            }
+            if (accumulator.length > 2 * 1024 * 1024) accumulator = Buffer.alloc(0);
+            break;
+          }
+
+          const frame = accumulator.subarray(soi, eoi + 2);
+          accumulator = accumulator.subarray(eoi + 2);
+
+          this.latestFrame = frame;
+
+          if (this.socketSubscribers > 0) {
+            io.to(`cam_${this.camId}`).emit("cam_frame", { id: this.camId, frame });
+          }
+        }
       });
 
       ff.on("close", () => {
         this.ffmpegProc = null;
         this.isStarting = false;
-        if (this.clients.size > 0) {
+        if (this.clients.size > 0 || this.socketSubscribers > 0) {
           if (!this.restartTimer) {
             this.restartTimer = setTimeout(() => {
               this.restartTimer = null;
-              if (this.clients.size > 0) {
+              if (this.clients.size > 0 || this.socketSubscribers > 0) {
                 this.startFfmpeg();
               }
             }, 1000);
