@@ -2756,6 +2756,232 @@ export default function App() {
 
               {/* Sidebar Info */}
               <div className="space-y-6">
+                {/* Painel de Esportes / Placar e Cronômetro */}
+                <div className="bg-[#151619] rounded-3xl border border-white/10 p-6">
+                  <div className="flex items-center gap-3 mb-6">
+                    <div className="p-2.5 rounded-xl bg-amber-500/10 text-amber-500">
+                      <Trophy size={20} />
+                    </div>
+                    <div>
+                      <h3 className="text-base font-bold text-white">Sobreposição de Esportes</h3>
+                      <p className="text-xs text-white/40">Placar e cronômetro ao vivo em tempo real</p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-6">
+                    {/* Toggles Principais */}
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        onClick={() => updateSportsState({ scoreboard_enabled: !isScoreboardEnabled })}
+                        className={`p-3 rounded-xl border text-xs font-bold transition-all flex flex-col items-center gap-1.5 ${isScoreboardEnabled ? 'bg-amber-500/10 border-amber-500 text-amber-500' : 'bg-black/20 border-white/5 text-white/40 hover:border-white/10'}`}
+                      >
+                        <span className="text-[10px] uppercase font-mono tracking-wider opacity-60">Modo Placar</span>
+                        <span className="text-xs uppercase font-bold">{isScoreboardEnabled ? 'Ativado' : 'Desativado'}</span>
+                      </button>
+
+                      <button
+                        onClick={() => updateSportsState({ timer_enabled: !isTimerEnabled })}
+                        className={`p-3 rounded-xl border text-xs font-bold transition-all flex flex-col items-center gap-1.5 ${isTimerEnabled ? 'bg-amber-500/10 border-amber-500 text-amber-500' : 'bg-black/20 border-white/5 text-white/40 hover:border-white/10'}`}
+                      >
+                        <span className="text-[10px] uppercase font-mono tracking-wider opacity-60">Modo Cronômetro</span>
+                        <span className="text-xs uppercase font-bold">{isTimerEnabled ? 'Ativado' : 'Desativado'}</span>
+                      </button>
+                    </div>
+
+                    {/* Configuração de Times & Pontuação */}
+                    {isScoreboardEnabled && (
+                      <div className="space-y-4 pt-4 border-t border-white/5 animate-fade-in">
+                        <h4 className="text-xs font-mono uppercase tracking-wider text-white/40">Configurações do Placar</h4>
+                        
+                        <div className="grid grid-cols-2 gap-4">
+                          {/* TIME A */}
+                          <div className="bg-black/20 rounded-2xl p-3 border border-white/5 space-y-3">
+                            <div>
+                              <label className="block text-[10px] font-mono text-white/40 uppercase mb-1">Time A</label>
+                              <input
+                                  type="text"
+                                  value={teamAName}
+                                  onChange={(e) => setTeamAName(e.target.value)}
+                                  onBlur={() => updateSportsState({ team_a_name: teamAName })}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      updateSportsState({ team_a_name: teamAName });
+                                      (e.target as HTMLInputElement).blur();
+                                    }
+                                  }}
+                                  className="w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-amber-500 font-bold"
+                                  placeholder="TIME A"
+                                />
+                            </div>
+                            
+                            <div className="flex items-center justify-between gap-1">
+                              <button
+                                onClick={() => updateSportsState({ score_a: Math.max(0, scoreA - 1) })}
+                                className="w-8 h-8 rounded-lg bg-white/5 hover:bg-white/10 text-white flex items-center justify-center font-bold text-sm transition-all"
+                              >
+                                -
+                              </button>
+                              <span className="font-mono text-xl font-extrabold text-white">{scoreA}</span>
+                              <button
+                                onClick={() => updateSportsState({ score_a: scoreA + 1 })}
+                                className="w-8 h-8 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-500 flex items-center justify-center font-bold text-sm transition-all"
+                              >
+                                +
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* TIME B */}
+                          <div className="bg-black/20 rounded-2xl p-3 border border-white/5 space-y-3">
+                            <div>
+                              <label className="block text-[10px] font-mono text-white/40 uppercase mb-1">Time B</label>
+                              <input
+                                  type="text"
+                                  value={teamBName}
+                                  onChange={(e) => setTeamBName(e.target.value)}
+                                  onBlur={() => updateSportsState({ team_b_name: teamBName })}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      updateSportsState({ team_b_name: teamBName });
+                                      (e.target as HTMLInputElement).blur();
+                                    }
+                                  }}
+                                  className="w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-amber-500 font-bold"
+                                  placeholder="TIME B"
+                                />
+                            </div>
+                            
+                            <div className="flex items-center justify-between gap-1">
+                              <button
+                                onClick={() => updateSportsState({ score_b: Math.max(0, scoreB - 1) })}
+                                className="w-8 h-8 rounded-lg bg-white/5 hover:bg-white/10 text-white flex items-center justify-center font-bold text-sm transition-all"
+                              >
+                                -
+                              </button>
+                              <span className="font-mono text-xl font-extrabold text-white">{scoreB}</span>
+                              <button
+                                onClick={() => updateSportsState({ score_b: scoreB + 1 })}
+                                className="w-8 h-8 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-500 flex items-center justify-center font-bold text-sm transition-all"
+                              >
+                                +
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Controle do Cronômetro */}
+                    {isTimerEnabled && (
+                      <div className="space-y-4 pt-4 border-t border-white/5 animate-fade-in">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-mono uppercase tracking-wider text-white/40">Controle do Tempo</h4>
+                          <span className="font-mono text-base font-extrabold text-amber-500 bg-amber-500/10 px-2.5 py-0.5 rounded-lg">
+                            {String(Math.floor(timerSeconds / 60)).padStart(2, '0')}:{String(timerSeconds % 60).padStart(2, '0')}
+                          </span>
+                        </div>
+
+                        {/* Botões de Ação do Cronômetro */}
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => updateSportsState({ timer_running: !isTimerRunning })}
+                            className={`flex-1 py-2 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${isTimerRunning ? 'bg-red-500/10 border border-red-500/30 text-red-500 hover:bg-red-500/20' : 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20'}`}
+                          >
+                            {isTimerRunning ? <Pause size={14} /> : <Play size={14} />}
+                            {isTimerRunning ? 'Pausar' : 'Iniciar'}
+                          </button>
+
+                          <button
+                            onClick={() => {
+                              updateSportsState({ timer_running: false, timer_seconds: 0 });
+                            }}
+                            className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-white/70 font-semibold text-xs transition-all flex items-center justify-center gap-1.5"
+                          >
+                            <RotateCcw size={14} />
+                            Zerar
+                          </button>
+                        </div>
+
+                        {/* Ajuste Rápido de Minutos */}
+                        <div className="grid grid-cols-3 gap-1.5 text-center font-bold">
+                          <button
+                            onClick={() => updateSportsState({ timer_seconds: Math.max(0, timerSeconds - 60) })}
+                            className="py-1.5 rounded-lg bg-black/40 hover:bg-black/60 border border-white/5 text-[10px] font-mono text-white/60 transition-all font-bold"
+                          >
+                            - 1 Min
+                          </button>
+                          <button
+                            onClick={() => updateSportsState({ timer_seconds: timerSeconds + 60 })}
+                            className="py-1.5 rounded-lg bg-[#EAB308]/10 hover:bg-[#EAB308]/20 border border-[#EAB308]/20 text-[10px] font-mono text-[#EAB308] transition-all font-bold"
+                          >
+                            + 1 Min
+                          </button>
+                          <button
+                            onClick={() => updateSportsState({ timer_seconds: timerSeconds + 300 })}
+                            className="py-1.5 rounded-lg bg-[#EAB308]/10 hover:bg-[#EAB308]/20 border border-[#EAB308]/20 text-[10px] font-mono text-[#EAB308] transition-all font-bold"
+                          >
+                            + 5 Min
+                          </button>
+                        </div>
+
+                        {/* Ajuste Manual Preciso */}
+                        <div className="bg-black/20 p-3 rounded-2xl border border-white/5 space-y-2">
+                          <span className="block text-[9px] font-mono uppercase tracking-wider text-white/40">Definir Tempo Manual</span>
+                          <div className="flex items-center gap-2">
+                            <div className="flex-1">
+                              <input
+                                type="number"
+                                min="0"
+                                max="99"
+                                value={Math.floor(timerSeconds / 60)}
+                                onChange={(e) => {
+                                  const m = parseInt(e.target.value) || 0;
+                                  const s = timerSeconds % 60;
+                                  setTimerSeconds(m * 60 + s);
+                                }}
+                                onBlur={() => updateSportsState({ timer_seconds: timerSeconds })}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    updateSportsState({ timer_seconds: timerSeconds });
+                                    (e.target as HTMLInputElement).blur();
+                                  }
+                                }}
+                                className="w-full text-center bg-black/40 border border-white/10 rounded-lg py-1 text-xs text-white focus:outline-none focus:border-amber-500 font-mono font-bold"
+                                placeholder="Min"
+                              />
+                              <span className="block text-center text-[8px] text-white/30 uppercase font-mono mt-0.5">Minutos</span>
+                            </div>
+                            <span className="text-white/40 font-bold">:</span>
+                            <div className="flex-1">
+                              <input
+                                type="number"
+                                min="0"
+                                max="59"
+                                value={timerSeconds % 60}
+                                onChange={(e) => {
+                                  const m = Math.floor(timerSeconds / 60);
+                                  const s = parseInt(e.target.value) || 0;
+                                  setTimerSeconds(m * 60 + (s % 60));
+                                }}
+                                onBlur={() => updateSportsState({ timer_seconds: timerSeconds })}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    updateSportsState({ timer_seconds: timerSeconds });
+                                    (e.target as HTMLInputElement).blur();
+                                  }
+                                }}
+                                className="w-full text-center bg-black/40 border border-white/10 rounded-lg py-1 text-xs text-white focus:outline-none focus:border-amber-500 font-mono font-bold"
+                                placeholder="Seg"
+                              />
+                              <span className="block text-center text-[8px] text-white/30 uppercase font-mono mt-0.5">Segundos</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
                 <div className="bg-[#151619] rounded-3xl border border-white/10 p-6">
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="text-lg font-bold flex items-center gap-2">
@@ -2982,232 +3208,6 @@ export default function App() {
                             </div>
                           );
                         })}
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Painel de Esportes / Placar e Cronômetro */}
-                <div className="bg-[#151619] rounded-3xl border border-white/10 p-6">
-                  <div className="flex items-center gap-3 mb-6">
-                    <div className="p-2.5 rounded-xl bg-amber-500/10 text-amber-500">
-                      <Trophy size={20} />
-                    </div>
-                    <div>
-                      <h3 className="text-base font-bold text-white">Sobreposição de Esportes</h3>
-                      <p className="text-xs text-white/40">Placar e cronômetro ao vivo em tempo real</p>
-                    </div>
-                  </div>
-
-                  <div className="space-y-6">
-                    {/* Toggles Principais */}
-                    <div className="grid grid-cols-2 gap-3">
-                      <button
-                        onClick={() => updateSportsState({ scoreboard_enabled: !isScoreboardEnabled })}
-                        className={`p-3 rounded-xl border text-xs font-bold transition-all flex flex-col items-center gap-1.5 ${isScoreboardEnabled ? 'bg-amber-500/10 border-amber-500 text-amber-500' : 'bg-black/20 border-white/5 text-white/40 hover:border-white/10'}`}
-                      >
-                        <span className="text-[10px] uppercase font-mono tracking-wider opacity-60">Modo Placar</span>
-                        <span className="text-xs uppercase font-bold">{isScoreboardEnabled ? 'Ativado' : 'Desativado'}</span>
-                      </button>
-
-                      <button
-                        onClick={() => updateSportsState({ timer_enabled: !isTimerEnabled })}
-                        className={`p-3 rounded-xl border text-xs font-bold transition-all flex flex-col items-center gap-1.5 ${isTimerEnabled ? 'bg-amber-500/10 border-amber-500 text-amber-500' : 'bg-black/20 border-white/5 text-white/40 hover:border-white/10'}`}
-                      >
-                        <span className="text-[10px] uppercase font-mono tracking-wider opacity-60">Modo Cronômetro</span>
-                        <span className="text-xs uppercase font-bold">{isTimerEnabled ? 'Ativado' : 'Desativado'}</span>
-                      </button>
-                    </div>
-
-                    {/* Configuração de Times & Pontuação */}
-                    {isScoreboardEnabled && (
-                      <div className="space-y-4 pt-4 border-t border-white/5 animate-fade-in">
-                        <h4 className="text-xs font-mono uppercase tracking-wider text-white/40">Configurações do Placar</h4>
-                        
-                        <div className="grid grid-cols-2 gap-4">
-                          {/* TIME A */}
-                          <div className="bg-black/20 rounded-2xl p-3 border border-white/5 space-y-3">
-                            <div>
-                              <label className="block text-[10px] font-mono text-white/40 uppercase mb-1">Time A</label>
-                              <input
-                                  type="text"
-                                  value={teamAName}
-                                  onChange={(e) => setTeamAName(e.target.value)}
-                                  onBlur={() => updateSportsState({ team_a_name: teamAName })}
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter') {
-                                      updateSportsState({ team_a_name: teamAName });
-                                      (e.target as HTMLInputElement).blur();
-                                    }
-                                  }}
-                                  className="w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-amber-500 font-bold"
-                                  placeholder="TIME A"
-                                />
-                            </div>
-                            
-                            <div className="flex items-center justify-between gap-1">
-                              <button
-                                onClick={() => updateSportsState({ score_a: Math.max(0, scoreA - 1) })}
-                                className="w-8 h-8 rounded-lg bg-white/5 hover:bg-white/10 text-white flex items-center justify-center font-bold text-sm transition-all"
-                              >
-                                -
-                              </button>
-                              <span className="font-mono text-xl font-extrabold text-white">{scoreA}</span>
-                              <button
-                                onClick={() => updateSportsState({ score_a: scoreA + 1 })}
-                                className="w-8 h-8 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-500 flex items-center justify-center font-bold text-sm transition-all"
-                              >
-                                +
-                              </button>
-                            </div>
-                          </div>
-
-                          {/* TIME B */}
-                          <div className="bg-black/20 rounded-2xl p-3 border border-white/5 space-y-3">
-                            <div>
-                              <label className="block text-[10px] font-mono text-white/40 uppercase mb-1">Time B</label>
-                              <input
-                                  type="text"
-                                  value={teamBName}
-                                  onChange={(e) => setTeamBName(e.target.value)}
-                                  onBlur={() => updateSportsState({ team_b_name: teamBName })}
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter') {
-                                      updateSportsState({ team_b_name: teamBName });
-                                      (e.target as HTMLInputElement).blur();
-                                    }
-                                  }}
-                                  className="w-full bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-amber-500 font-bold"
-                                  placeholder="TIME B"
-                                />
-                            </div>
-                            
-                            <div className="flex items-center justify-between gap-1">
-                              <button
-                                onClick={() => updateSportsState({ score_b: Math.max(0, scoreB - 1) })}
-                                className="w-8 h-8 rounded-lg bg-white/5 hover:bg-white/10 text-white flex items-center justify-center font-bold text-sm transition-all"
-                              >
-                                -
-                              </button>
-                              <span className="font-mono text-xl font-extrabold text-white">{scoreB}</span>
-                              <button
-                                onClick={() => updateSportsState({ score_b: scoreB + 1 })}
-                                className="w-8 h-8 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-500 flex items-center justify-center font-bold text-sm transition-all"
-                              >
-                                +
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Controle do Cronômetro */}
-                    {isTimerEnabled && (
-                      <div className="space-y-4 pt-4 border-t border-white/5 animate-fade-in">
-                        <div className="flex items-center justify-between">
-                          <h4 className="text-xs font-mono uppercase tracking-wider text-white/40">Controle do Tempo</h4>
-                          <span className="font-mono text-base font-extrabold text-amber-500 bg-amber-500/10 px-2.5 py-0.5 rounded-lg">
-                            {String(Math.floor(timerSeconds / 60)).padStart(2, '0')}:{String(timerSeconds % 60).padStart(2, '0')}
-                          </span>
-                        </div>
-
-                        {/* Botões de Ação do Cronômetro */}
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => updateSportsState({ timer_running: !isTimerRunning })}
-                            className={`flex-1 py-2 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all ${isTimerRunning ? 'bg-red-500/10 border border-red-500/30 text-red-500 hover:bg-red-500/20' : 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20'}`}
-                          >
-                            {isTimerRunning ? <Pause size={14} /> : <Play size={14} />}
-                            {isTimerRunning ? 'Pausar' : 'Iniciar'}
-                          </button>
-
-                          <button
-                            onClick={() => {
-                              updateSportsState({ timer_running: false, timer_seconds: 0 });
-                            }}
-                            className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-white/70 font-semibold text-xs transition-all flex items-center justify-center gap-1.5"
-                          >
-                            <RotateCcw size={14} />
-                            Zerar
-                          </button>
-                        </div>
-
-                        {/* Ajuste Rápido de Minutos */}
-                        <div className="grid grid-cols-3 gap-1.5 text-center font-bold">
-                          <button
-                            onClick={() => updateSportsState({ timer_seconds: Math.max(0, timerSeconds - 60) })}
-                            className="py-1.5 rounded-lg bg-black/40 hover:bg-black/60 border border-white/5 text-[10px] font-mono text-white/60 transition-all font-bold"
-                          >
-                            - 1 Min
-                          </button>
-                          <button
-                            onClick={() => updateSportsState({ timer_seconds: timerSeconds + 60 })}
-                            className="py-1.5 rounded-lg bg-[#EAB308]/10 hover:bg-[#EAB308]/20 border border-[#EAB308]/20 text-[10px] font-mono text-[#EAB308] transition-all font-bold"
-                          >
-                            + 1 Min
-                          </button>
-                          <button
-                            onClick={() => updateSportsState({ timer_seconds: timerSeconds + 300 })}
-                            className="py-1.5 rounded-lg bg-[#EAB308]/10 hover:bg-[#EAB308]/20 border border-[#EAB308]/20 text-[10px] font-mono text-[#EAB308] transition-all font-bold"
-                          >
-                            + 5 Min
-                          </button>
-                        </div>
-
-                        {/* Ajuste Manual Preciso */}
-                        <div className="bg-black/20 p-3 rounded-2xl border border-white/5 space-y-2">
-                          <span className="block text-[9px] font-mono uppercase tracking-wider text-white/40">Definir Tempo Manual</span>
-                          <div className="flex items-center gap-2">
-                            <div className="flex-1">
-                              <input
-                                type="number"
-                                min="0"
-                                max="99"
-                                value={Math.floor(timerSeconds / 60)}
-                                onChange={(e) => {
-                                  const m = parseInt(e.target.value) || 0;
-                                  const s = timerSeconds % 60;
-                                  setTimerSeconds(m * 60 + s);
-                                }}
-                                onBlur={() => updateSportsState({ timer_seconds: timerSeconds })}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') {
-                                    updateSportsState({ timer_seconds: timerSeconds });
-                                    (e.target as HTMLInputElement).blur();
-                                  }
-                                }}
-                                className="w-full text-center bg-black/40 border border-white/10 rounded-lg py-1 text-xs text-white focus:outline-none focus:border-amber-500 font-mono font-bold"
-                                placeholder="Min"
-                              />
-                              <span className="block text-center text-[8px] text-white/30 uppercase font-mono mt-0.5">Minutos</span>
-                            </div>
-                            <span className="text-white/40 font-bold">:</span>
-                            <div className="flex-1">
-                              <input
-                                type="number"
-                                min="0"
-                                max="59"
-                                value={timerSeconds % 60}
-                                onChange={(e) => {
-                                  const m = Math.floor(timerSeconds / 60);
-                                  const s = parseInt(e.target.value) || 0;
-                                  setTimerSeconds(m * 60 + (s % 60));
-                                }}
-                                onBlur={() => updateSportsState({ timer_seconds: timerSeconds })}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') {
-                                    updateSportsState({ timer_seconds: timerSeconds });
-                                    (e.target as HTMLInputElement).blur();
-                                  }
-                                }}
-                                className="w-full text-center bg-black/40 border border-white/10 rounded-lg py-1 text-xs text-white focus:outline-none focus:border-amber-500 font-mono font-bold"
-                                placeholder="Seg"
-                              />
-                              <span className="block text-center text-[8px] text-white/30 uppercase font-mono mt-0.5">Segundos</span>
-                            </div>
-                          </div>
-                        </div>
                       </div>
                     )}
                   </div>
