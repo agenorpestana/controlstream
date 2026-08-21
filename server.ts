@@ -800,19 +800,14 @@ async function startServer() {
   }
 
   const probeCameraHasAudio = async (rtspUrl: string, camId: number | string): Promise<boolean> => {
-    const streamUrl = getInternalStreamUrl(rtspUrl);
-    const isRtmp = streamUrl && (streamUrl.startsWith("rtmp://") || streamUrl.startsWith("rtmps://"));
-
-    // RTMP cameras universally deliver audio stream packets
-    if (isRtmp) {
-      camAudioCache[camId] = true;
-      return true;
-    }
-
     if (camAudioCache[camId] !== undefined) {
       return camAudioCache[camId];
     }
-    const transportOpts = ["-rtsp_transport", "tcp", "-stimeout", "3000000"];
+    const streamUrl = getInternalStreamUrl(rtspUrl);
+    const isRtmp = streamUrl && (streamUrl.startsWith("rtmp://") || streamUrl.startsWith("rtmps://"));
+    const transportOpts = isRtmp 
+      ? ["-analyzeduration", "1000000", "-probesize", "1000000"]
+      : ["-rtsp_transport", "tcp", "-stimeout", "3000000", "-analyzeduration", "1000000", "-probesize", "1000000"];
 
     return new Promise<boolean>((resolve) => {
       let proc: any = null;
@@ -821,8 +816,6 @@ async function startServer() {
         proc = spawn("ffprobe", [
           ...transportOpts,
           "-v", "error",
-          "-probesize", "1000000",
-          "-analyzeduration", "1000000",
           "-select_streams", "a:0",
           "-show_entries", "stream=codec_type",
           "-of", "default=noprint_wrappers=1",
@@ -840,7 +833,7 @@ async function startServer() {
         const ok = out.toLowerCase().includes("audio");
         camAudioCache[camId] = ok;
         resolve(ok);
-      }, 2500);
+      }, 2000);
 
       if (proc.stdout) {
         proc.stdout.on("data", (d: any) => { out += d.toString(); });
@@ -910,13 +903,8 @@ async function startServer() {
         const streamUrl = getInternalStreamUrl(cam.rtsp_url);
         const isRtmp = streamUrl && (streamUrl.startsWith("rtmp://") || streamUrl.startsWith("rtmps://"));
 
-        // Fast probe audio presence to avoid FFmpeg fatal filtergraph errors on cameras without mic
-        if (isRtmp) {
-          hasAudio = true;
-          camAudioCache[cam.id] = true;
-        } else {
-          hasAudio = await probeCameraHasAudio(cam.rtsp_url, cam.id);
-        }
+        // Probe audio presence to avoid FFmpeg fatal filtergraph errors on cameras without mic
+        hasAudio = await probeCameraHasAudio(cam.rtsp_url, cam.id);
         if (cam.has_audio !== hasAudio) {
           cam.has_audio = hasAudio;
           saveDb(db);
@@ -942,8 +930,8 @@ async function startServer() {
             "-stimeout", "5000000",
             "-flags", "+low_delay",
             "-fflags", "+nobuffer+genpts+discardcorrupt",
-            "-analyzeduration", "500000", 
-            "-probesize", "500000", 
+            "-analyzeduration", "1000000", 
+            "-probesize", "1000000", 
             "-i", streamUrl
           );
         }
@@ -1000,13 +988,6 @@ async function startServer() {
         logoInputIndex = nextInputIndex++;
       }
 
-      // Add Silent audio generator if camera has no audio
-      let silenceInputIndex = -1;
-      if (!hasAudio && type !== "web") {
-        inputArgs.push("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100");
-        silenceInputIndex = nextInputIndex++;
-      }
-
       // Build -filter_complex for unified video and audio pipelines
       let filterComplexParts: string[] = [];
       let videoFilters: string[] = ["fps=30,format=yuv420p"];
@@ -1058,7 +1039,7 @@ async function startServer() {
         videoOutLabel = "[v_out]";
       }
 
-      // Audio filtering with real RTSP audio support, resampling and stereo mix
+      // Audio filtering with real RTSP/RTMP audio support, resampling, volume and stereo mix
       let audioOutLabel = "[a_out]";
       const narrationVolume = Math.max(0, (db.stream_status.mic_narration_volume ?? 100) / 100);
 
@@ -1079,8 +1060,8 @@ async function startServer() {
         addLog("[SERVER] ÁUDIO DA CÂMERA: Transmitindo som ambiente da câmera IP para o YouTube.\n");
         filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else {
-        addLog("[SERVER] ÁUDIO SILENCIOSO: Câmera sem microfone embutido. Enviando faixa silenciosa para o YouTube.\n");
-        filterComplexParts.push(`[${silenceInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        addLog("[SERVER] ÁUDIO SILENCIOSO: Câmera sem microfone embutido. Gerando áudio silencioso sincronizado para o YouTube.\n");
+        filterComplexParts.push(`anullsrc=channel_layout=stereo:sample_rate=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       }
 
       const mappingArgs = ["-map", videoOutLabel, "-map", audioOutLabel];
