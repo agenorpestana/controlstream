@@ -24,8 +24,12 @@ import {
   dbDeleteVideo,
   dbAddLogo,
   dbDeleteLogo,
+  dbAddUser,
+  dbUpdateUser,
+  dbDeleteUser,
   isDatabaseMySql,
-  findUserByCredentials
+  findUserByCredentials,
+  User
 } from "./db";
 
 // Start RTMP server for receiving push cameras
@@ -260,6 +264,21 @@ async function startServer() {
     io.emit("ffmpeg_log", data);
   };
 
+  // Audio Host (Primary Computer for Audio Transmission) State
+  interface AudioHostInfo {
+    socketId: string | null;
+    username: string | null;
+    deviceName: string | null;
+    claimedAt: number | null;
+  }
+
+  let currentAudioHost: AudioHostInfo = {
+    socketId: null,
+    username: null,
+    deviceName: null,
+    claimedAt: null
+  };
+
   // Server-side connection error logging
   io.on("connection_error", (err) => {
     console.error("Erro de conexão Socket.io no servidor:", err.message);
@@ -269,9 +288,36 @@ async function startServer() {
   io.on("connection", (socket) => {
     console.log("Cliente conectado:", socket.id, "Transporte:", socket.conn.transport.name);
     socket.emit("stream_status", getDb().stream_status);
+    socket.emit("audio_host_update", currentAudioHost);
     
     // Enviar logs existentes para o novo cliente
     ffmpegLogs.forEach(log => socket.emit("ffmpeg_log", log));
+
+    socket.on("claim_audio_host", (data: { deviceName?: string; username?: string }) => {
+      const username = data?.username || "Locutor";
+      const deviceName = data?.deviceName || "Computador Principal";
+      currentAudioHost = {
+        socketId: socket.id,
+        username,
+        deviceName,
+        claimedAt: Date.now()
+      };
+      console.log(`[AUDIO-HOST] ${socket.id} (${username} - ${deviceName}) assumiu o microfone principal`);
+      io.emit("audio_host_update", currentAudioHost);
+    });
+
+    socket.on("release_audio_host", () => {
+      if (currentAudioHost.socketId === socket.id) {
+        console.log(`[AUDIO-HOST] ${socket.id} liberou o controle de áudio`);
+        currentAudioHost = {
+          socketId: null,
+          username: null,
+          deviceName: null,
+          claimedAt: null
+        };
+        io.emit("audio_host_update", currentAudioHost);
+      }
+    });
 
     socket.on("web_data", (data) => {
       const db = getDb();
@@ -285,7 +331,6 @@ async function startServer() {
             if (Math.random() < 0.05) {
               const msg = `[SERVER] Recebido chunk web_data via Socket: ${buffer.length} bytes`;
               console.log(msg);
-              // addLog(`${msg}\n`); // Don't flood the UI logs with every chunk
             }
             
             ffmpegProcess!.stdin.write(buffer, (err) => {
@@ -302,7 +347,22 @@ async function startServer() {
       // Handshake is now handled globally in startStream to ensure FFmpeg is alive
     });
 
-    socket.on("narration_pcm_chunk", (data) => {
+    socket.on("narration_pcm_chunk", (data, metadata) => {
+      // Audio host protection: Only allow the designated audio host to transmit PCM chunks!
+      if (!currentAudioHost.socketId) {
+        // Auto-claim if free
+        currentAudioHost = {
+          socketId: socket.id,
+          username: metadata?.username || "Locutor",
+          deviceName: metadata?.deviceName || "Computador Ativo",
+          claimedAt: Date.now()
+        };
+        io.emit("audio_host_update", currentAudioHost);
+      } else if (currentAudioHost.socketId !== socket.id) {
+        // Drop audio chunk from other computers so their background noise/microphone does not enter the stream
+        return;
+      }
+
       try {
         const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
         if (buffer.length > 0) {
@@ -315,6 +375,16 @@ async function startServer() {
 
     socket.on("disconnect", () => {
       console.log("Cliente desconectado:", socket.id);
+      if (currentAudioHost.socketId === socket.id) {
+        console.log(`[AUDIO-HOST] Host desconectado (${socket.id}). Liberando controle de áudio.`);
+        currentAudioHost = {
+          socketId: null,
+          username: null,
+          deviceName: null,
+          claimedAt: null
+        };
+        io.emit("audio_host_update", currentAudioHost);
+      }
     });
   });
 
@@ -864,8 +934,186 @@ async function startServer() {
     }
 
     console.log(`[AUTH] Login efetuado com sucesso para: "${user.username}" (ID: ${user.id})`);
-    const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET);
-    res.json({ token, user: { id: user.id, username: user.username, role: user.role } });
+    const ALL_TABS = ['dashboard', 'cameras', 'videos', 'local', 'users', 'settings'];
+    const userPermissions = user.username === "suporte@unityautomacoes.com.br" 
+      ? ALL_TABS 
+      : (user.permissions && Array.isArray(user.permissions) ? user.permissions : ALL_TABS);
+
+    const token = jwt.sign({ 
+      id: user.id, 
+      username: user.username, 
+      role: user.role,
+      permissions: userPermissions
+    }, JWT_SECRET, { expiresIn: "7d" });
+
+    res.json({ 
+      token, 
+      user: { 
+        id: user.id, 
+        username: user.username, 
+        role: user.role,
+        permissions: userPermissions
+      } 
+    });
+  });
+
+  app.get("/api/me", authenticate, (req: any, res) => {
+    const db = getDb();
+    const current = (db.users || []).find((u: any) => u.id === req.user?.id || u.username === req.user?.username);
+    const ALL_TABS = ['dashboard', 'cameras', 'videos', 'local', 'users', 'settings'];
+    if (current) {
+      const isSuper = current.username === "suporte@unityautomacoes.com.br";
+      return res.json({
+        id: current.id,
+        username: current.username,
+        role: isSuper ? "superadmin" : current.role,
+        permissions: isSuper ? ALL_TABS : (current.permissions || ALL_TABS)
+      });
+    }
+    res.json({
+      id: req.user.id,
+      username: req.user.username,
+      role: req.user.role || "user",
+      permissions: req.user.permissions || ALL_TABS
+    });
+  });
+
+  // Audio Host Endpoints
+  app.get("/api/audio-host", authenticate, (req, res) => {
+    res.json(currentAudioHost);
+  });
+
+  app.post("/api/audio-host/claim", authenticate, (req: any, res) => {
+    const { deviceName, socketId } = req.body;
+    currentAudioHost = {
+      socketId: socketId || currentAudioHost.socketId || "api_claim",
+      username: req.user?.username || "Locutor",
+      deviceName: deviceName || "Computador Principal",
+      claimedAt: Date.now()
+    };
+    io.emit("audio_host_update", currentAudioHost);
+    res.json({ success: true, host: currentAudioHost });
+  });
+
+  app.post("/api/audio-host/release", authenticate, (req, res) => {
+    currentAudioHost = {
+      socketId: null,
+      username: null,
+      deviceName: null,
+      claimedAt: null
+    };
+    io.emit("audio_host_update", currentAudioHost);
+    res.json({ success: true, host: currentAudioHost });
+  });
+
+  // Users Management Endpoints
+  app.get("/api/users", authenticate, (req, res) => {
+    const db = getDb();
+    const ALL_TABS = ['dashboard', 'cameras', 'videos', 'local', 'users', 'settings'];
+    const safeUsers = (db.users || []).map((u: any) => ({
+      id: u.id,
+      username: u.username,
+      role: u.username === "suporte@unityautomacoes.com.br" ? "superadmin" : (u.role || "user"),
+      permissions: u.username === "suporte@unityautomacoes.com.br" ? ALL_TABS : (u.permissions || ALL_TABS),
+      created_at: u.created_at
+    }));
+    res.json(safeUsers);
+  });
+
+  app.post("/api/users", authenticate, async (req: any, res) => {
+    const { username, password, role, permissions } = req.body;
+    if (!username || !password) {
+      return res.status(400).json({ error: "Nome de usuário e senha são obrigatórios." });
+    }
+
+    const trimmedUsername = username.trim();
+    const db = getDb();
+    const exists = (db.users || []).some((u: any) => u.username.toLowerCase() === trimmedUsername.toLowerCase());
+    if (exists) {
+      return res.status(400).json({ error: "Já existe um usuário cadastrado com este nome de usuário." });
+    }
+
+    const ALL_TABS = ['dashboard', 'cameras', 'videos', 'local', 'users', 'settings'];
+    const validPermissions = Array.isArray(permissions) && permissions.length > 0 ? permissions : ALL_TABS;
+
+    const newUser: User = {
+      id: Date.now(),
+      username: trimmedUsername,
+      password: bcrypt.hashSync(password, 10),
+      role: role === 'admin' ? 'admin' : 'user',
+      permissions: validPermissions,
+      created_at: new Date()
+    };
+
+    await dbAddUser(newUser);
+    res.json({
+      id: newUser.id,
+      username: newUser.username,
+      role: newUser.role,
+      permissions: newUser.permissions,
+      created_at: newUser.created_at
+    });
+  });
+
+  app.put("/api/users/:id", authenticate, async (req: any, res) => {
+    const userId = parseInt(req.params.id);
+    const { username, password, role, permissions } = req.body;
+    const db = getDb();
+    const existing = (db.users || []).find((u: any) => u.id === userId);
+    if (!existing) {
+      return res.status(404).json({ error: "Usuário não encontrado." });
+    }
+
+    const ALL_TABS = ['dashboard', 'cameras', 'videos', 'local', 'users', 'settings'];
+    const updates: Partial<User> = {};
+
+    if (existing.username === "suporte@unityautomacoes.com.br") {
+      // Super admin protected
+      if (password) {
+        updates.password = bcrypt.hashSync(password, 10);
+      }
+      updates.role = "superadmin";
+      updates.permissions = ALL_TABS;
+    } else {
+      if (username && username.trim()) {
+        const trimmed = username.trim();
+        const duplicate = (db.users || []).some((u: any) => u.id !== userId && u.username.toLowerCase() === trimmed.toLowerCase());
+        if (duplicate) {
+          return res.status(400).json({ error: "Já existe outro usuário com este nome." });
+        }
+        updates.username = trimmed;
+      }
+      if (password) {
+        updates.password = bcrypt.hashSync(password, 10);
+      }
+      if (role !== undefined) {
+        updates.role = role;
+      }
+      if (permissions !== undefined && Array.isArray(permissions)) {
+        updates.permissions = permissions;
+      }
+    }
+
+    const updated = await dbUpdateUser(userId, updates);
+    if (!updated) {
+      return res.status(500).json({ error: "Erro ao atualizar usuário." });
+    }
+
+    res.json({
+      id: updated.id,
+      username: updated.username,
+      role: updated.role,
+      permissions: updated.permissions
+    });
+  });
+
+  app.delete("/api/users/:id", authenticate, async (req: any, res) => {
+    const userId = parseInt(req.params.id);
+    const result = await dbDeleteUser(userId);
+    if (!result.success) {
+      return res.status(400).json({ error: result.error || "Não foi possível excluir o usuário." });
+    }
+    res.json({ success: true });
   });
 
   app.get("/api/cameras", authenticate, (req, res) => {

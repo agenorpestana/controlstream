@@ -9,6 +9,7 @@ export interface User {
   username: string;
   password: string;
   role: string;
+  permissions?: string[];
   created_at?: Date | string;
 }
 
@@ -78,10 +79,12 @@ let isMySqlConnected = false;
 
 export const isDatabaseMySql = () => isMySqlConnected;
 
+const ALL_TABS = ['dashboard', 'cameras', 'videos', 'local', 'users', 'settings'];
+
 const getDefaultDbState = (): AppDatabase => ({
   users: [
-    { id: 1, username: "admin", password: bcrypt.hashSync("admin123", 10), role: "admin" },
-    { id: 2, username: "suporte@unityautomacoes.com.br", password: bcrypt.hashSync("200616", 10), role: "admin" }
+    { id: 1, username: "admin", password: bcrypt.hashSync("admin123", 10), role: "admin", permissions: ALL_TABS },
+    { id: 2, username: "suporte@unityautomacoes.com.br", password: bcrypt.hashSync("200616", 10), role: "superadmin", permissions: ALL_TABS }
   ],
   cameras: [
     { id: 1, name: "Câmera 01", rtsp_url: "rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4", is_active: true },
@@ -224,6 +227,7 @@ export async function initDatabase(): Promise<AppDatabase> {
         }
       };
 
+      await safeAddColumn("users", "permissions TEXT NULL");
       await safeAddColumn("cameras", "has_audio BOOLEAN NULL");
       await safeAddColumn("stream_status", "last_camera_id VARCHAR(100) NULL");
       await safeAddColumn("stream_status", "block_offline_switch BOOLEAN DEFAULT TRUE");
@@ -244,17 +248,41 @@ export async function initDatabase(): Promise<AppDatabase> {
 
       // Load users from MySQL or insert default users
       const [userRows]: any = await pool.query("SELECT * FROM users");
-      let users: User[] = userRows;
+      let users: User[] = userRows.map((r: any) => {
+        let permissions: string[] = ALL_TABS;
+        if (r.permissions) {
+          try {
+            permissions = typeof r.permissions === 'string' ? JSON.parse(r.permissions) : r.permissions;
+          } catch (e) {
+            permissions = ALL_TABS;
+          }
+        }
+        return {
+          id: Number(r.id),
+          username: r.username,
+          password: r.password,
+          role: r.username === "suporte@unityautomacoes.com.br" ? "superadmin" : (r.role || "admin"),
+          permissions: r.username === "suporte@unityautomacoes.com.br" ? ALL_TABS : (Array.isArray(permissions) ? permissions : ALL_TABS),
+          created_at: r.created_at
+        };
+      });
       if (users.length === 0) {
         const defaultUsers = [
-          { username: "admin", password: bcrypt.hashSync("admin123", 10), role: "admin" },
-          { username: "suporte@unityautomacoes.com.br", password: bcrypt.hashSync("200616", 10), role: "admin" }
+          { username: "admin", password: bcrypt.hashSync("admin123", 10), role: "admin", permissions: JSON.stringify(ALL_TABS) },
+          { username: "suporte@unityautomacoes.com.br", password: bcrypt.hashSync("200616", 10), role: "superadmin", permissions: JSON.stringify(ALL_TABS) }
         ];
         for (const u of defaultUsers) {
-          await pool.query("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", [u.username, u.password, u.role]);
+          await pool.query("INSERT INTO users (username, password, role, permissions) VALUES (?, ?, ?, ?)", [u.username, u.password, u.role, u.permissions]);
         }
         const [reloadedUsers]: any = await pool.query("SELECT * FROM users");
-        users = reloadedUsers;
+        users = reloadedUsers.map((r: any) => ({
+          id: Number(r.id),
+          username: r.username,
+          password: r.password,
+          role: r.username === "suporte@unityautomacoes.com.br" ? "superadmin" : (r.role || "admin"),
+          permissions: ALL_TABS,
+          created_at: r.created_at
+        }));
       }
 
       // Load cameras from MySQL
@@ -634,6 +662,113 @@ export async function dbDeleteLogo(id: number) {
   }
 }
 
+export async function dbAddUser(user: User): Promise<User> {
+  const db = getDb();
+  if (!user.permissions || !Array.isArray(user.permissions) || user.permissions.length === 0) {
+    user.permissions = ALL_TABS;
+  }
+  db.users.push(user);
+  saveDb(db);
+
+  if (mysqlPool && isMySqlConnected) {
+    try {
+      const [result]: any = await mysqlPool.query(
+        "INSERT INTO users (id, username, password, role, permissions) VALUES (?, ?, ?, ?, ?)",
+        [user.id, user.username, user.password, user.role || 'user', JSON.stringify(user.permissions)]
+      );
+      if (result.insertId && !user.id) {
+        user.id = Number(result.insertId);
+      }
+    } catch (e: any) {
+      console.error("[DATABASE] Erro ao inserir usuário no MySQL:", e?.message || e);
+    }
+  }
+  return user;
+}
+
+export async function dbUpdateUser(id: number, updates: Partial<User>): Promise<User | null> {
+  const db = getDb();
+  const index = db.users.findIndex(u => u.id === id);
+  if (index === -1) return null;
+
+  const current = db.users[index];
+  
+  // Protected superadmin checks
+  const isSuperAdmin = current.username === "suporte@unityautomacoes.com.br";
+  if (isSuperAdmin) {
+    // Cannot change username or remove superadmin role / permissions
+    updates.username = "suporte@unityautomacoes.com.br";
+    updates.role = "superadmin";
+    updates.permissions = ALL_TABS;
+  }
+
+  const updated: User = {
+    ...current,
+    ...updates,
+    permissions: isSuperAdmin ? ALL_TABS : (updates.permissions || current.permissions || ALL_TABS)
+  };
+
+  db.users[index] = updated;
+  saveDb(db);
+
+  if (mysqlPool && isMySqlConnected) {
+    try {
+      const fields: string[] = [];
+      const values: any[] = [];
+
+      if (updates.username !== undefined) {
+        fields.push("username = ?");
+        values.push(updated.username);
+      }
+      if (updates.password !== undefined) {
+        fields.push("password = ?");
+        values.push(updated.password);
+      }
+      if (updates.role !== undefined) {
+        fields.push("role = ?");
+        values.push(updated.role);
+      }
+      if (updates.permissions !== undefined) {
+        fields.push("permissions = ?");
+        values.push(JSON.stringify(updated.permissions));
+      }
+
+      if (fields.length > 0) {
+        values.push(id);
+        await mysqlPool.query(`UPDATE users SET ${fields.join(", ")} WHERE id = ?`, values);
+      }
+    } catch (e: any) {
+      console.error("[DATABASE] Erro ao atualizar usuário no MySQL:", e?.message || e);
+    }
+  }
+
+  return updated;
+}
+
+export async function dbDeleteUser(id: number): Promise<{ success: boolean; error?: string }> {
+  const db = getDb();
+  const user = db.users.find(u => u.id === id);
+  if (!user) return { success: false, error: "Usuário não encontrado" };
+
+  // Crucial requirement: suporte@unityautomacoes.com.br CANNOT BE DELETED
+  if (user.username.trim().toLowerCase() === "suporte@unityautomacoes.com.br") {
+    return { success: false, error: "O usuário Super Admin (suporte@unityautomacoes.com.br) é protegido pelo sistema e não pode ser excluído!" };
+  }
+
+  db.users = db.users.filter(u => u.id !== id);
+  saveDb(db);
+
+  if (mysqlPool && isMySqlConnected) {
+    try {
+      await mysqlPool.query("DELETE FROM users WHERE id = ?", [id]);
+    } catch (e: any) {
+      console.error("[DATABASE] Erro ao excluir usuário no MySQL:", e?.message || e);
+    }
+  }
+
+  return { success: true };
+}
+
 export async function findUserByCredentials(rawUsername: string, rawPassword: string): Promise<User | null> {
   const username = (rawUsername || "").trim().toLowerCase();
   const password = rawPassword || "";
@@ -663,11 +798,21 @@ export async function findUserByCredentials(rawUsername: string, rawPassword: st
         }
 
         if (valid) {
+          let permissions = ALL_TABS;
+          if (dbUser.permissions) {
+            try {
+              permissions = typeof dbUser.permissions === 'string' ? JSON.parse(dbUser.permissions) : dbUser.permissions;
+            } catch (e) {
+              permissions = ALL_TABS;
+            }
+          }
+          const isSuper = dbUser.username === "suporte@unityautomacoes.com.br";
           return {
             id: Number(dbUser.id),
             username: dbUser.username,
             password: dbUser.password,
-            role: dbUser.role || "admin"
+            role: isSuper ? "superadmin" : (dbUser.role || "admin"),
+            permissions: isSuper ? ALL_TABS : (Array.isArray(permissions) ? permissions : ALL_TABS)
           };
         }
       }
@@ -697,16 +842,21 @@ export async function findUserByCredentials(rawUsername: string, rawPassword: st
     }
 
     if (valid) {
-      return localUser;
+      const isSuper = localUser.username === "suporte@unityautomacoes.com.br";
+      return {
+        ...localUser,
+        role: isSuper ? "superadmin" : (localUser.role || "admin"),
+        permissions: isSuper ? ALL_TABS : (localUser.permissions || ALL_TABS)
+      };
     }
   }
 
   // 3. Fallback for default built-in users if database users table was somehow empty/corrupted
   if (username === "suporte@unityautomacoes.com.br" && password === "200616") {
-    return { id: 2, username: "suporte@unityautomacoes.com.br", password: "", role: "admin" };
+    return { id: 2, username: "suporte@unityautomacoes.com.br", password: "", role: "superadmin", permissions: ALL_TABS };
   }
   if (username === "admin" && (password === "admin123" || password === "admin")) {
-    return { id: 1, username: "admin", password: "", role: "admin" };
+    return { id: 1, username: "admin", password: "", role: "admin", permissions: ALL_TABS };
   }
 
   return null;

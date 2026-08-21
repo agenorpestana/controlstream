@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Camera, Video, Play, Square, Settings, Plus, Trash2, LogOut, Activity, Monitor, Upload, Repeat, RefreshCw, Mic, MicOff, Trophy, Pause, RotateCcw, Edit, AlertTriangle, X, Volume2, Radio, Headphones, VolumeX, Sliders } from 'lucide-react';
+import { Camera, Video, Play, Square, Settings, Plus, Trash2, LogOut, Activity, Monitor, Upload, Repeat, RefreshCw, Mic, MicOff, Trophy, Pause, RotateCcw, Edit, AlertTriangle, X, Volume2, Radio, Headphones, VolumeX, Sliders, Users, UserPlus, Shield, ShieldAlert, Key, Check, CheckSquare, Laptop, Cast, Lock, UserCheck } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { io } from 'socket.io-client';
 
@@ -23,6 +23,21 @@ interface LogoData {
   name: string;
   file_path: string;
   created_at: string;
+}
+
+export interface UserItem {
+  id: number;
+  username: string;
+  role: 'superadmin' | 'admin' | 'user' | string;
+  permissions: string[];
+  created_at?: string;
+}
+
+export interface AudioHostInfo {
+  socketId: string | null;
+  username: string | null;
+  deviceName: string | null;
+  claimedAt: number | null;
 }
 
 interface StreamStatus {
@@ -52,7 +67,8 @@ interface StreamStatus {
 const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
   const [error, setError] = useState(false);
-  const [imgSrc, setImgSrc] = useState<string>(() => `/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
+  // Start with empty imgSrc so the initial HTML page load completes immediately without Chrome spinner hanging
+  const [imgSrc, setImgSrc] = useState<string>('');
   const [snapshotSrc] = useState<string>(() => `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const isMountedRef = useRef(true);
@@ -65,7 +81,13 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
 
   useEffect(() => {
     isMountedRef.current = true;
-    reloadStream();
+    
+    // Attach stream slightly after initial render to avoid hanging window.onload
+    const timer = setTimeout(() => {
+      if (isMountedRef.current) {
+        reloadStream();
+      }
+    }, 200);
 
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
@@ -88,6 +110,7 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
     window.addEventListener('focus', handleWindowFocus);
 
     return () => {
+      clearTimeout(timer);
       isMountedRef.current = false;
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('focus', handleWindowFocus);
@@ -208,10 +231,40 @@ export default function App() {
   const [isUploadingLogo, setIsUploadingLogo] = useState(false);
   const logoFileInputRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<StreamStatus | null>(null);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'cameras' | 'videos' | 'settings'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'cameras' | 'videos' | 'local' | 'users' | 'settings'>('dashboard');
   const [newCam, setNewCam] = useState({ name: '', rtsp_url: '' });
   const [camProtocol, setCamProtocol] = useState<'rtsp' | 'rtmp'>('rtsp');
   const [rtmpStreamKey, setRtmpStreamKey] = useState(() => 'cam_' + Math.random().toString(36).substring(2, 8));
+
+  // Current Logged-in User State & Role-Based Access Control
+  const [currentUser, setCurrentUser] = useState<UserItem | null>(() => {
+    try {
+      const cached = localStorage.getItem('current_user');
+      return cached ? JSON.parse(cached) : null;
+    } catch (e) {
+      return null;
+    }
+  });
+  const [usersList, setUsersList] = useState<UserItem[]>([]);
+  const [isUserModalOpen, setIsUserModalOpen] = useState(false);
+  const [editingUser, setEditingUser] = useState<UserItem | null>(null);
+  const [userFormUsername, setUserFormUsername] = useState('');
+  const [userFormPassword, setUserFormPassword] = useState('');
+  const [userFormRole, setUserFormRole] = useState<'admin' | 'user'>('user');
+  const [userFormPermissions, setUserFormPermissions] = useState<string[]>(['dashboard', 'cameras', 'videos', 'local', 'settings']);
+  const [userActionError, setUserActionError] = useState<string | null>(null);
+  const [userActionSuccess, setUserActionSuccess] = useState<string | null>(null);
+  const [isSavingUser, setIsSavingUser] = useState(false);
+
+  // Audio Host (Primary Computer for Audio Capture) State
+  const [audioHost, setAudioHost] = useState<AudioHostInfo | null>(null);
+  const [deviceName, setDeviceName] = useState(() => {
+    const saved = localStorage.getItem('stream_device_name');
+    if (saved) return saved;
+    const generated = 'PC-' + Math.random().toString(36).substring(2, 6).toUpperCase();
+    localStorage.setItem('stream_device_name', generated);
+    return generated;
+  });
 
   // Edit Camera Modal State
   const [editingCam, setEditingCam] = useState<CameraData | null>(null);
@@ -491,7 +544,9 @@ export default function App() {
 
   // Live Narration Web Audio Streamer -> Socket.io PCM 16-bit 44.1kHz Stereo
   useEffect(() => {
-    const isEnabled = Boolean(status?.mic_narration_enabled);
+    const isThisDeviceAudioHost = !audioHost?.socketId || audioHost.socketId === socketRef.current?.id;
+    const isEnabled = Boolean(status?.mic_narration_enabled) && isThisDeviceAudioHost;
+    
     if (!isEnabled) {
       if (narrationMediaStreamRef.current) {
         narrationMediaStreamRef.current.getTracks().forEach(t => t.stop());
@@ -745,7 +800,7 @@ export default function App() {
       monitorGainNodeRef.current = null;
       setMicAudioLevel(0);
     };
-  }, [Boolean(status?.mic_narration_enabled), selectedAudioDeviceId]);
+  }, [Boolean(status?.mic_narration_enabled), selectedAudioDeviceId, audioHost?.socketId]);
 
   // Sync Mic Monitor Gain Node
   useEffect(() => {
@@ -886,6 +941,10 @@ export default function App() {
 
       socket.on('logos', (newLogos: any[]) => {
         setLogos(newLogos);
+      });
+
+      socket.on('audio_host_update', (host: AudioHostInfo) => {
+        setAudioHost(host);
       });
 
       socket.on('ffmpeg_log', (log: string) => {
@@ -1077,11 +1136,14 @@ export default function App() {
     const headers = { Authorization: `Bearer ${token}` };
 
     try {
-      const [camsRes, vidsRes, statusRes, logosRes] = await Promise.all([
+      const [camsRes, vidsRes, statusRes, logosRes, meRes, usersRes, hostRes] = await Promise.all([
         fetch('/api/cameras', { headers }),
         fetch('/api/videos', { headers }),
         fetch('/api/status', { headers }),
-        fetch('/api/logos', { headers })
+        fetch('/api/logos', { headers }),
+        fetch('/api/me', { headers }).catch(() => null),
+        fetch('/api/users', { headers }).catch(() => null),
+        fetch('/api/audio-host', { headers }).catch(() => null)
       ]);
       
       if (camsRes.status === 401 || vidsRes.status === 401 || statusRes.status === 401 || logosRes.status === 401) {
@@ -1089,6 +1151,22 @@ export default function App() {
         localStorage.removeItem('token');
         setIsLoggedIn(false);
         return;
+      }
+
+      if (meRes && meRes.ok) {
+        const meData = await meRes.json();
+        setCurrentUser(meData);
+        localStorage.setItem('current_user', JSON.stringify(meData));
+      }
+
+      if (usersRes && usersRes.ok) {
+        const uData = await usersRes.json();
+        setUsersList(uData);
+      }
+
+      if (hostRes && hostRes.ok) {
+        const hData = await hostRes.json();
+        setAudioHost(hData);
       }
 
       if (camsRes.ok) {
@@ -1258,6 +1336,10 @@ export default function App() {
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.token) {
         localStorage.setItem('token', data.token);
+        if (data.user) {
+          setCurrentUser(data.user);
+          localStorage.setItem('current_user', JSON.stringify(data.user));
+        }
         setIsLoggedIn(true);
       } else {
         alert(data.error || 'Falha no login. Verifique seu usuário e senha.');
@@ -1269,6 +1351,8 @@ export default function App() {
 
   const handleLogout = () => {
     localStorage.removeItem('token');
+    localStorage.removeItem('current_user');
+    setCurrentUser(null);
     setIsLoggedIn(false);
   };
 
@@ -1873,6 +1957,198 @@ export default function App() {
     }
   };
 
+  // Audio Host Controls
+  const claimAudioHost = async () => {
+    const dName = deviceName || 'Computador Operador';
+    const uName = currentUser?.username || 'Operador';
+    
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit("claim_audio_host", { deviceName: dName, username: uName });
+    } else {
+      const token = localStorage.getItem('token');
+      await fetch('/api/audio-host/claim', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ deviceName: dName, username: uName })
+      });
+      fetchData();
+    }
+  };
+
+  const releaseAudioHost = async () => {
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit("release_audio_host");
+    } else {
+      const token = localStorage.getItem('token');
+      await fetch('/api/audio-host/release', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      fetchData();
+    }
+  };
+
+  // User Management Handlers
+  const openAddUserModal = () => {
+    setEditingUser(null);
+    setUserFormUsername('');
+    setUserFormPassword('');
+    setUserFormRole('user');
+    setUserFormPermissions(['dashboard', 'cameras', 'videos', 'local', 'settings']);
+    setUserActionError(null);
+    setUserActionSuccess(null);
+    setIsUserModalOpen(true);
+  };
+
+  const openEditUserModal = (u: UserItem) => {
+    setEditingUser(u);
+    setUserFormUsername(u.username);
+    setUserFormPassword('');
+    setUserFormRole(u.role === 'admin' || u.role === 'superadmin' ? 'admin' : 'user');
+    setUserFormPermissions(u.permissions && u.permissions.length > 0 ? u.permissions : ['dashboard', 'cameras', 'videos', 'local', 'settings']);
+    setUserActionError(null);
+    setUserActionSuccess(null);
+    setIsUserModalOpen(true);
+  };
+
+  const handleSaveUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setUserActionError(null);
+    setUserActionSuccess(null);
+
+    if (!userFormUsername.trim()) {
+      setUserActionError('Informe o nome ou e-mail de login.');
+      return;
+    }
+
+    if (!editingUser && !userFormPassword) {
+      setUserActionError('Informe a senha do novo usuário.');
+      return;
+    }
+
+    const token = localStorage.getItem('token');
+    setIsSavingUser(true);
+
+    try {
+      if (editingUser) {
+        // Update user
+        const isTargetSuper = editingUser.username === 'suporte@unityautomacoes.com.br';
+        const body: any = {
+          username: userFormUsername.trim(),
+          role: isTargetSuper ? 'superadmin' : userFormRole,
+          permissions: isTargetSuper ? ['dashboard', 'cameras', 'videos', 'local', 'users', 'settings'] : userFormPermissions
+        };
+        if (userFormPassword) {
+          body.password = userFormPassword;
+        }
+
+        const res = await fetch(`/api/users/${editingUser.id}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Erro ao atualizar usuário');
+        }
+
+        setUserActionSuccess('Usuário atualizado com sucesso!');
+        setTimeout(() => {
+          setIsUserModalOpen(false);
+          fetchData();
+        }, 600);
+      } else {
+        // Create user
+        const res = await fetch('/api/users', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            username: userFormUsername.trim(),
+            password: userFormPassword,
+            role: userFormRole,
+            permissions: userFormPermissions
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Erro ao cadastrar usuário');
+        }
+
+        setUserActionSuccess('Novo usuário cadastrado com sucesso!');
+        setTimeout(() => {
+          setIsUserModalOpen(false);
+          fetchData();
+        }, 600);
+      }
+    } catch (err: any) {
+      setUserActionError(err.message || 'Erro ao salvar usuário');
+    } finally {
+      setIsSavingUser(false);
+    }
+  };
+
+  const handleDeleteUser = async (u: UserItem) => {
+    if (u.username === 'suporte@unityautomacoes.com.br') {
+      alert('O usuário Super Admin suporte@unityautomacoes.com.br é protegido e não pode ser excluído.');
+      return;
+    }
+
+    if (!confirm(`Tem certeza que deseja excluir o usuário "${u.username}"?`)) {
+      return;
+    }
+
+    const token = localStorage.getItem('token');
+    try {
+      const res = await fetch(`/api/users/${u.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || 'Erro ao excluir usuário');
+      } else {
+        fetchData();
+      }
+    } catch (err) {
+      console.error("Erro ao excluir:", err);
+      alert("Erro de conexão ao excluir usuário");
+    }
+  };
+
+  const ALL_SYSTEM_TABS: { id: 'dashboard' | 'cameras' | 'videos' | 'local' | 'users' | 'settings'; label: string; icon: any }[] = [
+    { id: 'dashboard', label: 'Painel', icon: Monitor },
+    { id: 'cameras', label: 'Câmeras', icon: Camera },
+    { id: 'videos', label: 'Vídeos', icon: Video },
+    { id: 'local', label: 'Transmissão Local', icon: Radio },
+    { id: 'users', label: 'Usuários', icon: Users },
+    { id: 'settings', label: 'Configurações', icon: Settings },
+  ];
+
+  const isSuperAdmin = currentUser?.username === 'suporte@unityautomacoes.com.br' || currentUser?.role === 'superadmin';
+
+  const userPerms = isSuperAdmin 
+    ? ['dashboard', 'cameras', 'videos', 'local', 'users', 'settings']
+    : (currentUser?.permissions && Array.isArray(currentUser.permissions) && currentUser.permissions.length > 0
+        ? currentUser.permissions
+        : ['dashboard', 'cameras', 'videos', 'local', 'settings']);
+
+  const availableTabs = ALL_SYSTEM_TABS.filter(t => isSuperAdmin || userPerms.includes(t.id));
+
+  // If user loses permission to active tab, redirect to first available tab
+  useEffect(() => {
+    if (availableTabs.length > 0 && !availableTabs.some(t => t.id === activeTab)) {
+      setActiveTab(availableTabs[0].id);
+    }
+  }, [currentUser, availableTabs, activeTab]);
+
+  const isThisDeviceAudioHost = !audioHost?.socketId || audioHost.socketId === socketRef.current?.id;
+
   if (!isLoggedIn) {
     return (
       <div className="min-h-screen bg-[#0a0a0a] flex items-center justify-center p-4 font-sans text-white">
@@ -1932,50 +2208,47 @@ export default function App() {
         </div>
         
         <nav className="flex-1 px-4 py-4 space-y-2">
-          <button 
-            onClick={() => setActiveTab('dashboard')}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'dashboard' ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20' : 'text-white/60 hover:bg-white/5'}`}
-          >
-            <Monitor size={20} />
-            <span className="font-medium">Painel</span>
-          </button>
-          <button 
-            onClick={() => setActiveTab('cameras')}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'cameras' ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20' : 'text-white/60 hover:bg-white/5'}`}
-          >
-            <Camera size={20} />
-            <span className="font-medium">Câmeras</span>
-          </button>
-          <button 
-            onClick={() => setActiveTab('videos')}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'videos' ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20' : 'text-white/60 hover:bg-white/5'}`}
-          >
-            <Video size={20} />
-            <span className="font-medium">Vídeos</span>
-          </button>
-          <button 
-            onClick={() => setActiveTab('local')}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'local' ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20' : 'text-white/60 hover:bg-white/5'}`}
-          >
-            <Monitor size={20} />
-            <span className="font-medium">Transmissão Local</span>
-          </button>
-          <button 
-            onClick={() => setActiveTab('settings')}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'settings' ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20' : 'text-white/60 hover:bg-white/5'}`}
-          >
-            <Settings size={20} />
-            <span className="font-medium">Configurações</span>
-          </button>
+          {availableTabs.map((tab) => {
+            const Icon = tab.icon;
+            const isTabActive = activeTab === tab.id;
+            return (
+              <button 
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id as any)}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all cursor-pointer ${
+                  isTabActive 
+                    ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20' 
+                    : 'text-white/60 hover:bg-white/5 hover:text-white'
+                }`}
+              >
+                <Icon size={20} />
+                <span className="font-medium">{tab.label}</span>
+              </button>
+            );
+          })}
         </nav>
 
-        <div className="p-4 border-t border-white/10">
+        <div className="p-4 border-t border-white/10 space-y-3">
+          <div className="bg-black/30 p-3 rounded-xl border border-white/5 flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold text-xs shrink-0">
+              {isSuperAdmin ? <Shield size={16} /> : <Users size={16} />}
+            </div>
+            <div className="overflow-hidden flex-1">
+              <span className="text-xs font-bold text-white block truncate" title={currentUser?.username}>
+                {currentUser?.username || 'Operador'}
+              </span>
+              <span className="text-[10px] text-white/40 block font-mono uppercase">
+                {isSuperAdmin ? 'Super Admin' : currentUser?.role === 'admin' ? 'Administrador' : 'Operador'}
+              </span>
+            </div>
+          </div>
+
           <button 
             onClick={handleLogout}
-            className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-red-400 hover:bg-red-400/10 transition-all"
+            className="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-red-400 hover:bg-red-400/10 transition-all text-sm font-medium cursor-pointer"
           >
-            <LogOut size={20} />
-            <span className="font-medium">Sair</span>
+            <LogOut size={18} />
+            <span>Sair</span>
           </button>
         </div>
       </aside>
@@ -1996,11 +2269,54 @@ export default function App() {
 
         <header className="mb-10 flex flex-col md:flex-row md:items-center justify-between gap-4 relative">
           <div>
-            <h2 className="text-3xl font-bold capitalize">{activeTab === 'dashboard' ? 'Painel de Controle' : activeTab === 'cameras' ? 'Câmeras' : activeTab === 'videos' ? 'Vídeos Comerciais' : 'Configurações'}</h2>
+            <h2 className="text-3xl font-bold capitalize">
+              {activeTab === 'dashboard' ? 'Painel de Controle' : 
+               activeTab === 'cameras' ? 'Câmeras' : 
+               activeTab === 'videos' ? 'Vídeos Comerciais' : 
+               activeTab === 'local' ? 'Transmissão Local' :
+               activeTab === 'users' ? 'Gerenciamento de Usuários' : 'Configurações'}
+            </h2>
             <p className="text-white/40 mt-1">Gerencie sua infraestrutura de transmissão ao vivo</p>
           </div>
           
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            {/* Indicador e Controle de Computador Principal de Áudio */}
+            {status?.mic_narration_enabled && (
+              <div className="relative">
+                {isThisDeviceAudioHost ? (
+                  <div className="flex items-center gap-2 bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 px-3.5 py-2 rounded-2xl shadow-sm">
+                    <Radio size={16} className="text-emerald-400 animate-pulse shrink-0" />
+                    <div className="flex flex-col">
+                      <span className="text-xs font-bold font-mono leading-tight">Microfone: Principal (Este PC)</span>
+                      <span className="text-[9px] text-emerald-400/70 font-mono leading-tight">Áudio enviado ao YouTube</span>
+                    </div>
+                    <button
+                      onClick={releaseAudioHost}
+                      className="ml-1 px-2 py-0.5 bg-emerald-500/30 hover:bg-emerald-500/50 rounded-lg text-[10px] font-bold text-emerald-200 transition-colors cursor-pointer"
+                      title="Liberar controle de áudio para outro computador assumir"
+                    >
+                      Liberar
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2.5 bg-amber-500/15 border border-amber-500/40 text-amber-300 px-3.5 py-2 rounded-2xl shadow-sm">
+                    <MicOff size={16} className="text-amber-400 shrink-0" />
+                    <div className="flex flex-col">
+                      <span className="text-[11px] font-bold font-mono leading-tight">Áudio: {audioHost?.deviceName || 'Outro PC'}</span>
+                      <span className="text-[9px] text-amber-300/60 leading-tight">Microfone desativado neste PC</span>
+                    </div>
+                    <button
+                      onClick={claimAudioHost}
+                      className="ml-1 px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-black font-bold rounded-lg text-[10px] uppercase tracking-tight transition-all cursor-pointer shadow-sm"
+                      title="Tornar este computador o transmissor oficial de microfone"
+                    >
+                      Tornar Principal
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Botão de Retorno de Áudio (Monitor de Fone de Ouvido) */}
             <div className="relative">
               <button 
@@ -3878,9 +4194,400 @@ export default function App() {
                       </div>
                     )}
                   </div>
+
+                  {/* Controle de Computador Principal de Áudio (Microfone Multi-PC) */}
+                  <div className="p-6 bg-[#151619] rounded-3xl border border-white/10 shadow-2xl space-y-6">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="p-3 bg-emerald-500/10 rounded-2xl text-emerald-400">
+                          <Laptop size={22} />
+                        </div>
+                        <div>
+                          <h3 className="font-bold text-lg">Computador Principal de Áudio (Multi-Operador)</h3>
+                          <p className="text-xs text-white/40">Evita que o áudio de dois computadores se sobreponha na transmissão</p>
+                        </div>
+                      </div>
+
+                      {isThisDeviceAudioHost ? (
+                        <span className="px-3 py-1 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-full text-xs font-mono font-bold">
+                          ESTE PC É O PRINCIPAL
+                        </span>
+                      ) : (
+                        <span className="px-3 py-1 bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-full text-xs font-mono font-bold">
+                          MICROFONE DESATIVADO NESTE PC
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="p-4 bg-black/30 rounded-2xl border border-white/5 space-y-3">
+                        <label className="block text-xs font-mono uppercase text-white/40">Nome deste Computador / Dispositivo</label>
+                        <div className="flex gap-2">
+                          <input 
+                            type="text"
+                            value={deviceName}
+                            onChange={(e) => {
+                              setDeviceName(e.target.value);
+                              localStorage.setItem('stream_device_name', e.target.value);
+                            }}
+                            className="flex-1 bg-black/50 border border-white/10 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
+                            placeholder="Ex: Notebook Transmissão 01"
+                          />
+                        </div>
+                        <p className="text-[11px] text-white/40">
+                          Identifica este dispositivo para os outros computadores conectados na rede.
+                        </p>
+                      </div>
+
+                      <div className="p-4 bg-black/30 rounded-2xl border border-white/5 flex flex-col justify-between">
+                        <div>
+                          <span className="block text-xs font-mono uppercase text-white/40">Dispositivo Transmissor Atual</span>
+                          <div className="flex items-center gap-2 mt-1">
+                            <Radio size={16} className={audioHost?.socketId ? 'text-emerald-400' : 'text-white/40'} />
+                            <span className="text-sm font-bold text-white">
+                              {audioHost?.deviceName || 'Nenhum computador fixado (Qualquer um pode transmitir)'}
+                            </span>
+                          </div>
+                          {audioHost?.username && (
+                            <span className="text-[11px] text-white/40 font-mono block mt-0.5">
+                              Operador: {audioHost.username}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="mt-4 flex gap-2">
+                          {isThisDeviceAudioHost ? (
+                            <button
+                              type="button"
+                              onClick={releaseAudioHost}
+                              className="px-4 py-2 bg-white/10 hover:bg-white/15 text-white/80 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                            >
+                              Liberar Controle de Áudio
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={claimAudioHost}
+                              className="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-emerald-500/20 cursor-pointer"
+                            >
+                              Definir Este PC Como Principal
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </motion.div>
+          )}
+
+          {/* TAB DE GERENCIAMENTO DE USUÁRIOS */}
+          {activeTab === 'users' && (
+            <motion.div
+              key="users"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className="space-y-6"
+            >
+              {/* Header da Aba de Usuários */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#151619] p-6 rounded-3xl border border-white/10 shadow-xl">
+                <div>
+                  <div className="flex items-center gap-3">
+                    <div className="p-3 bg-emerald-500/10 rounded-2xl text-emerald-400">
+                      <Users size={24} />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-xl text-white">Cadastro de Usuários e Permissões</h3>
+                      <p className="text-xs text-white/40 mt-0.5">Configure os acessos individuais por abas para cada operador do sistema</p>
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  onClick={openAddUserModal}
+                  className="flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-5 py-3 rounded-2xl font-bold text-sm shadow-lg shadow-emerald-500/20 transition-all cursor-pointer shrink-0 active:scale-[0.98]"
+                >
+                  <UserPlus size={18} />
+                  <span>Cadastrar Novo Usuário</span>
+                </button>
+              </div>
+
+              {/* Lista de Usuários */}
+              <div className="bg-[#151619] rounded-3xl border border-white/10 overflow-hidden shadow-2xl">
+                <div className="p-5 border-b border-white/10 flex items-center justify-between bg-black/20">
+                  <span className="text-xs font-mono uppercase tracking-widest text-white/40">
+                    Usuários Registrados ({usersList.length})
+                  </span>
+                  <span className="text-[11px] text-emerald-400 font-mono flex items-center gap-1.5">
+                    <Shield size={14} /> Super Admin Protegido
+                  </span>
+                </div>
+
+                <div className="divide-y divide-white/5">
+                  {usersList.map((u) => {
+                    const isSuper = u.username === 'suporte@unityautomacoes.com.br' || u.role === 'superadmin';
+                    const allowedTabs = isSuper ? ['dashboard', 'cameras', 'videos', 'local', 'users', 'settings'] : (u.permissions || []);
+
+                    return (
+                      <div key={u.id} className="p-5 hover:bg-white/[0.02] transition-colors flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div className="flex items-start gap-4">
+                          <div className={`p-3 rounded-2xl shrink-0 mt-1 ${isSuper ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-white/5 text-white/60 border border-white/5'}`}>
+                            {isSuper ? <ShieldAlert size={22} /> : <Users size={22} />}
+                          </div>
+                          
+                          <div className="space-y-1.5">
+                            <div className="flex items-center gap-2.5 flex-wrap">
+                              <span className="text-base font-bold text-white">{u.username}</span>
+                              {isSuper && (
+                                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                                  SUPER ADMIN
+                                </span>
+                              )}
+                              {!isSuper && u.role === 'admin' && (
+                                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                                  ADMINISTRADOR
+                                </span>
+                              )}
+                              {!isSuper && u.role !== 'admin' && (
+                                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-blue-500/20 text-blue-300 border border-blue-500/30">
+                                  OPERADOR
+                                </span>
+                              )}
+                              {currentUser?.id === u.id && (
+                                <span className="px-2 py-0.5 rounded-full text-[9px] font-mono font-bold bg-emerald-500/20 text-emerald-400">
+                                  SEU USUÁRIO
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Abas Permitidas */}
+                            <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                              <span className="text-[10px] font-mono text-white/40 uppercase mr-1">Abas:</span>
+                              {ALL_SYSTEM_TABS.map((tab) => {
+                                const hasAccess = isSuper || allowedTabs.includes(tab.id);
+                                return (
+                                  <span
+                                    key={tab.id}
+                                    className={`px-2 py-0.5 rounded-lg text-[10px] font-mono font-semibold transition-all ${
+                                      hasAccess
+                                        ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/25'
+                                        : 'bg-white/5 text-white/20 border border-white/5 line-through'
+                                    }`}
+                                  >
+                                    {tab.label}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Botões de Ação */}
+                        <div className="flex items-center gap-2 self-end md:self-center shrink-0">
+                          <button
+                            onClick={() => openEditUserModal(u)}
+                            className="p-2.5 bg-white/5 hover:bg-white/10 text-white/80 hover:text-white rounded-xl transition-all flex items-center gap-2 text-xs font-medium cursor-pointer"
+                            title="Editar Permissões ou Senha"
+                          >
+                            <Edit size={16} />
+                            <span>Editar</span>
+                          </button>
+
+                          {isSuper ? (
+                            <span 
+                              className="p-2.5 bg-white/5 text-white/20 rounded-xl text-xs font-medium flex items-center gap-1.5 cursor-not-allowed"
+                              title="Usuário Super Admin protegido contra exclusão"
+                            >
+                              <Lock size={15} />
+                              <span>Protegido</span>
+                            </span>
+                          ) : (
+                            <button
+                              onClick={() => handleDeleteUser(u)}
+                              className="p-2.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-xl transition-all flex items-center gap-1.5 text-xs font-medium cursor-pointer"
+                              title="Excluir Usuário"
+                            >
+                              <Trash2 size={16} />
+                              <span>Excluir</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* MODAL DE CADASTRO / EDIÇÃO DE USUÁRIO */}
+        <AnimatePresence>
+          {isUserModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                className="w-full max-w-lg bg-[#151619] border border-white/15 rounded-3xl p-6 sm:p-8 shadow-2xl space-y-6 overflow-hidden"
+              >
+                <div className="flex items-center justify-between pb-4 border-b border-white/10">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2.5 bg-emerald-500/10 text-emerald-400 rounded-2xl">
+                      {editingUser ? <Edit size={20} /> : <UserPlus size={20} />}
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-lg text-white">
+                        {editingUser ? `Editar Usuário (${editingUser.username})` : 'Novo Cadastro de Usuário'}
+                      </h3>
+                      <p className="text-xs text-white/40">Defina o login, senha e quais abas podem ser acessadas</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setIsUserModalOpen(false)}
+                    className="p-2 hover:bg-white/10 rounded-xl text-white/40 hover:text-white transition-colors cursor-pointer"
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
+
+                {userActionError && (
+                  <div className="p-3.5 bg-red-500/15 border border-red-500/30 text-red-300 rounded-2xl text-xs flex items-center gap-2.5">
+                    <AlertTriangle size={18} className="shrink-0 text-red-400" />
+                    <span>{userActionError}</span>
+                  </div>
+                )}
+
+                {userActionSuccess && (
+                  <div className="p-3.5 bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 rounded-2xl text-xs flex items-center gap-2.5">
+                    <Check size={18} className="shrink-0 text-emerald-400" />
+                    <span>{userActionSuccess}</span>
+                  </div>
+                )}
+
+                <form onSubmit={handleSaveUser} className="space-y-5">
+                  <div>
+                    <label className="block text-xs font-mono uppercase text-white/40 mb-1.5">Usuário / E-mail</label>
+                    <input
+                      type="text"
+                      disabled={editingUser?.username === 'suporte@unityautomacoes.com.br'}
+                      value={userFormUsername}
+                      onChange={(e) => setUserFormUsername(e.target.value)}
+                      className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+                      placeholder="operador1 ou suporte@empresa.com"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="block text-xs font-mono uppercase text-white/40">
+                        {editingUser ? 'Nova Senha (Deixe em branco para manter a atual)' : 'Senha'}
+                      </label>
+                    </div>
+                    <input
+                      type="password"
+                      value={userFormPassword}
+                      onChange={(e) => setUserFormPassword(e.target.value)}
+                      className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-emerald-500"
+                      placeholder="••••••••"
+                      required={!editingUser}
+                    />
+                  </div>
+
+                  {editingUser?.username !== 'suporte@unityautomacoes.com.br' && (
+                    <div>
+                      <label className="block text-xs font-mono uppercase text-white/40 mb-1.5">Tipo de Perfil</label>
+                      <select
+                        value={userFormRole}
+                        onChange={(e) => setUserFormRole(e.target.value as any)}
+                        className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-emerald-500"
+                      >
+                        <option value="user">Operador (Acesso às abas selecionadas)</option>
+                        <option value="admin">Administrador (Controle completo)</option>
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Permissões de Abas */}
+                  {editingUser?.username !== 'suporte@unityautomacoes.com.br' && (
+                    <div className="p-4 bg-black/30 rounded-2xl border border-white/5 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <label className="block text-xs font-mono uppercase text-white/60 font-bold">
+                          Permissões de Abas do Sistema
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (userFormPermissions.length === ALL_SYSTEM_TABS.length) {
+                              setUserFormPermissions([]);
+                            } else {
+                              setUserFormPermissions(ALL_SYSTEM_TABS.map(t => t.id));
+                            }
+                          }}
+                          className="text-[10px] font-mono uppercase text-emerald-400 hover:underline"
+                        >
+                          {userFormPermissions.length === ALL_SYSTEM_TABS.length ? 'Desmarcar Todas' : 'Selecionar Todas'}
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                        {ALL_SYSTEM_TABS.map((tab) => {
+                          const isChecked = userFormPermissions.includes(tab.id);
+                          const Icon = tab.icon;
+
+                          return (
+                            <label
+                              key={tab.id}
+                              className={`flex items-center gap-3 p-2.5 rounded-xl border transition-all cursor-pointer select-none ${
+                                isChecked
+                                  ? 'bg-emerald-500/15 border-emerald-500/40 text-white'
+                                  : 'bg-white/5 border-white/5 text-white/50 hover:bg-white/10'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setUserFormPermissions(prev => [...prev, tab.id]);
+                                  } else {
+                                    setUserFormPermissions(prev => prev.filter(t => t !== tab.id));
+                                  }
+                                }}
+                                className="accent-emerald-500 rounded"
+                              />
+                              <Icon size={16} className={isChecked ? 'text-emerald-400' : 'text-white/40'} />
+                              <span className="text-xs font-medium">{tab.label}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-end gap-3 pt-4 border-t border-white/10">
+                    <button
+                      type="button"
+                      onClick={() => setIsUserModalOpen(false)}
+                      className="px-5 py-3 bg-white/5 hover:bg-white/10 text-white rounded-xl text-xs font-bold transition-all cursor-pointer"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isSavingUser}
+                      className="px-6 py-3 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-emerald-500/20 cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                    >
+                      {isSavingUser && <RefreshCw size={14} className="animate-spin" />}
+                      <span>{editingUser ? 'Salvar Alterações' : 'Criar Usuário'}</span>
+                    </button>
+                  </div>
+                </form>
+              </motion.div>
+            </div>
           )}
         </AnimatePresence>
       </main>
