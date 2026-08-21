@@ -1091,6 +1091,12 @@ async function startServer() {
 
             // Barra amarela de destaque na base do scorebug
             videoFilters.push("drawbox=x=40:y=98:w=330:h=3:color=0xEAB308:t=fill");
+
+            // Indicador de Tie-break no Scorebug
+            if (db.stream_status.tennis_tiebreak) {
+              videoFilters.push("drawbox=x=40:y=102:w=330:h=18:color=0xEAB308:t=fill");
+              videoFilters.push(`drawtext=text='*** TIE-BREAK ***':x=150:y=105:fontcolor=black:fontsize=11${fontFileOpt}`);
+            }
           } else {
             // Estilo Futebol / Padrão
             videoFilters.push("drawbox=x=40:y=40:w=320:h=42:color=black@0.85:t=fill");
@@ -2103,6 +2109,7 @@ async function startServer() {
     const db = getDb();
     const wasScoreboardEnabled = db.stream_status.scoreboard_enabled;
     const wasScoreboardStyle = db.stream_status.scoreboard_style || 'soccer';
+    const wasTennisTiebreak = Boolean(db.stream_status.tennis_tiebreak);
     const wasTimerEnabled = db.stream_status.timer_enabled;
     
     if (scoreboard_enabled !== undefined) db.stream_status.scoreboard_enabled = scoreboard_enabled;
@@ -2136,6 +2143,9 @@ async function startServer() {
         needsRestart = true;
       }
       if (scoreboard_style !== undefined && scoreboard_style !== wasScoreboardStyle) {
+        needsRestart = true;
+      }
+      if (tennis_tiebreak !== undefined && Boolean(tennis_tiebreak) !== wasTennisTiebreak && db.stream_status.scoreboard_style === 'tennis') {
         needsRestart = true;
       }
       if (timer_enabled !== undefined && timer_enabled !== wasTimerEnabled) {

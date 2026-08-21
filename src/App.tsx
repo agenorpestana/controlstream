@@ -3028,6 +3028,17 @@ export default function App() {
                                     </div>
                                   </div>
                                   
+                                  {/* Indicador de Tie-Break no Scorebug */}
+                                  {tennisTiebreak && (
+                                    <div className="bg-amber-400 text-black px-2.5 py-0.5 flex items-center justify-between text-[9px] font-black tracking-wider uppercase border-t border-black/30 animate-pulse">
+                                      <div className="flex items-center gap-1.5">
+                                        <span className="w-2 h-2 rounded-full bg-black" />
+                                        <span>TIE-BREAK EM ANDAMENTO</span>
+                                      </div>
+                                      <span className="text-[8px] bg-black text-amber-400 px-1 py-0.2 rounded font-mono font-bold">TB</span>
+                                    </div>
+                                  )}
+
                                   {/* Amber Accent Base Line */}
                                   <div className="h-1 w-full bg-amber-500" />
                                 </div>
@@ -3057,7 +3068,7 @@ export default function App() {
                             )}
 
                             {isTimerEnabled && (
-                              <div className={`font-mono font-extrabold text-xs md:text-base px-3 md:px-4 py-2 ${scoreboardStyle === 'tennis' && isScoreboardEnabled ? 'h-[73px] ml-1 rounded-lg' : 'h-[42px] ' + (isScoreboardEnabled ? 'rounded-r-md' : 'rounded-md')} flex items-center justify-center min-w-[65px] md:min-w-[80px] text-black bg-amber-500`}>
+                              <div className={`font-mono font-extrabold text-xs md:text-base px-3 md:px-4 py-2 ${scoreboardStyle === 'tennis' && isScoreboardEnabled ? (tennisTiebreak ? 'h-[92px] ml-1 rounded-lg' : 'h-[73px] ml-1 rounded-lg') : 'h-[42px] ' + (isScoreboardEnabled ? 'rounded-r-md' : 'rounded-md')} flex items-center justify-center min-w-[65px] md:min-w-[80px] text-black bg-amber-500`}>
                                 {String(Math.floor(timerSeconds / 60)).padStart(2, '0')}:{String(timerSeconds % 60).padStart(2, '0')}
                               </div>
                             )}
@@ -3303,34 +3314,37 @@ export default function App() {
                       </button>
                     </div>
 
-                    {/* Seletor de Modelo de Placar (Futebol vs Tênis Scorebug) */}
-                    {isScoreboardEnabled && (
-                      <div className="space-y-3 pt-4 border-t border-white/5 animate-fade-in">
-                        <div className="flex items-center justify-between">
+                    {/* Seletor de Modelo de Placar (Futebol vs Tênis Scorebug) - Sempre visível para pré-configuração */}
+                    <div className="space-y-3 pt-4 border-t border-white/5 animate-fade-in">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
                           <label className="text-[10px] font-mono uppercase tracking-wider text-white/40">Estilo do Placar</label>
-                          <span className="text-[10px] font-bold text-amber-500 bg-amber-500/10 px-2 py-0.5 rounded">
-                            {scoreboardStyle === 'tennis' ? 'Tênis Scorebug' : 'Futebol Padrão'}
+                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${isScoreboardEnabled ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-white/5 text-white/40'}`}>
+                            {isScoreboardEnabled ? '● NO AR' : '○ OCULTO'}
                           </span>
                         </div>
-                        <div className="grid grid-cols-2 gap-2 p-1 bg-black/40 rounded-xl border border-white/5">
-                          <button
-                            onClick={() => updateSportsState({ scoreboard_style: 'soccer' })}
-                            className={`py-2 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 ${scoreboardStyle === 'soccer' ? 'bg-amber-500 text-black shadow-md' : 'text-white/60 hover:text-white hover:bg-white/5'}`}
-                          >
-                            <span>⚽ Futebol / Geral</span>
-                          </button>
-                          <button
-                            onClick={() => updateSportsState({ scoreboard_style: 'tennis' })}
-                            className={`py-2 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 ${scoreboardStyle === 'tennis' ? 'bg-amber-500 text-black shadow-md' : 'text-white/60 hover:text-white hover:bg-white/5'}`}
-                          >
-                            <span>🎾 Tênis Scorebug</span>
-                          </button>
-                        </div>
+                        <span className="text-[10px] font-bold text-amber-500 bg-amber-500/10 px-2 py-0.5 rounded">
+                          {scoreboardStyle === 'tennis' ? 'Tênis Scorebug' : 'Futebol Padrão'}
+                        </span>
                       </div>
-                    )}
+                      <div className="grid grid-cols-2 gap-2 p-1 bg-black/40 rounded-xl border border-white/5">
+                        <button
+                          onClick={() => updateSportsState({ scoreboard_style: 'soccer' })}
+                          className={`py-2 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 ${scoreboardStyle === 'soccer' ? 'bg-amber-500 text-black shadow-md' : 'text-white/60 hover:text-white hover:bg-white/5'}`}
+                        >
+                          <span>⚽ Futebol / Geral</span>
+                        </button>
+                        <button
+                          onClick={() => updateSportsState({ scoreboard_style: 'tennis' })}
+                          className={`py-2 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 ${scoreboardStyle === 'tennis' ? 'bg-amber-500 text-black shadow-md' : 'text-white/60 hover:text-white hover:bg-white/5'}`}
+                        >
+                          <span>🎾 Tênis Scorebug</span>
+                        </button>
+                      </div>
+                    </div>
 
                     {/* Controles para Modelo: FUTEBOL / GERAL */}
-                    {isScoreboardEnabled && scoreboardStyle === 'soccer' && (
+                    {scoreboardStyle === 'soccer' && (
                       <div className="space-y-4 pt-2 animate-fade-in">
                         <h4 className="text-xs font-mono uppercase tracking-wider text-white/40">Configurações de Futebol / Geral</h4>
                         
@@ -3413,18 +3427,31 @@ export default function App() {
                     )}
 
                     {/* Controles para Modelo: TÊNIS / BEACH TENNIS (SCOREBUG) */}
-                    {isScoreboardEnabled && scoreboardStyle === 'tennis' && (
+                    {scoreboardStyle === 'tennis' && (
                       <div className="space-y-4 pt-2 animate-fade-in">
                         <div className="flex items-center justify-between">
                           <h4 className="text-xs font-mono uppercase tracking-wider text-white/40">Controles de Tênis</h4>
                           <button
                             onClick={() => updateSportsState({ tennis_tiebreak: !tennisTiebreak })}
-                            className={`text-[10px] font-bold px-2 py-0.5 rounded transition-all flex items-center gap-1 ${tennisTiebreak ? 'bg-amber-500 text-black' : 'bg-white/10 text-white/60 hover:text-white'}`}
+                            className={`text-[10px] font-extrabold px-3 py-1 rounded-lg transition-all flex items-center gap-1.5 shadow-sm ${tennisTiebreak ? 'bg-amber-500 text-black ring-2 ring-amber-400/50' : 'bg-white/10 text-white/60 hover:text-white'}`}
                           >
-                            <span>Tie-break:</span>
-                            <span>{tennisTiebreak ? 'ON' : 'OFF'}</span>
+                            <span>🔥 Tie-break:</span>
+                            <span className="uppercase">{tennisTiebreak ? 'ATIVO (ON)' : 'OFF'}</span>
                           </button>
                         </div>
+
+                        {/* Banner de Aviso de Tie-break no Painel */}
+                        {tennisTiebreak && (
+                          <div className="bg-amber-500/15 border border-amber-500/30 text-amber-400 rounded-xl p-2.5 flex items-center justify-between text-xs font-bold animate-pulse">
+                            <div className="flex items-center gap-2">
+                              <span>🔥</span>
+                              <span>TIE-BREAK EM ANDAMENTO</span>
+                            </div>
+                            <span className="text-[10px] uppercase bg-amber-500 text-black px-2 py-0.5 rounded font-black tracking-wide">
+                              Pontos Diretos
+                            </span>
+                          </div>
+                        )}
 
                         {/* Botões Rápidos de Ponto (+PONTO) */}
                         <div className="grid grid-cols-2 gap-2">
@@ -3510,7 +3537,7 @@ export default function App() {
 
                           {/* Seletor rápido de pontuação para Jogador A */}
                           <div className="flex items-center gap-1 pt-1">
-                            {['0', '15', '30', '40', 'AD'].map((pt) => (
+                            {(tennisTiebreak ? ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'] : ['0', '15', '30', '40', 'AD']).map((pt) => (
                               <button
                                 key={pt}
                                 onClick={() => updateSportsState({ tennis_points_a: pt })}
@@ -3588,7 +3615,7 @@ export default function App() {
 
                           {/* Seletor rápido de pontuação para Jogador B */}
                           <div className="flex items-center gap-1 pt-1">
-                            {['0', '15', '30', '40', 'AD'].map((pt) => (
+                            {(tennisTiebreak ? ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'] : ['0', '15', '30', '40', 'AD']).map((pt) => (
                               <button
                                 key={pt}
                                 onClick={() => updateSportsState({ tennis_points_b: pt })}
@@ -3630,15 +3657,19 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* Controle do Cronômetro */}
-                    {isTimerEnabled && (
-                      <div className="space-y-4 pt-4 border-t border-white/5 animate-fade-in">
-                        <div className="flex items-center justify-between">
+                    {/* Controle do Cronômetro - Sempre Visível */}
+                    <div className="space-y-4 pt-4 border-t border-white/5 animate-fade-in">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
                           <h4 className="text-xs font-mono uppercase tracking-wider text-white/40">Controle do Tempo</h4>
-                          <span className="font-mono text-base font-extrabold text-amber-500 bg-amber-500/10 px-2.5 py-0.5 rounded-lg">
-                            {String(Math.floor(timerSeconds / 60)).padStart(2, '0')}:{String(timerSeconds % 60).padStart(2, '0')}
+                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${isTimerEnabled ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-white/5 text-white/40'}`}>
+                            {isTimerEnabled ? '● NO AR' : '○ OCULTO'}
                           </span>
                         </div>
+                        <span className="font-mono text-base font-extrabold text-amber-500 bg-amber-500/10 px-2.5 py-0.5 rounded-lg">
+                          {String(Math.floor(timerSeconds / 60)).padStart(2, '0')}:{String(timerSeconds % 60).padStart(2, '0')}
+                        </span>
+                      </div>
 
                         {/* Botões de Ação do Cronômetro */}
                         <div className="flex gap-2">
@@ -3737,9 +3768,8 @@ export default function App() {
                           </div>
                         </div>
                       </div>
-                    )}
+                    </div>
                   </div>
-                </div>
 
                 <div className="bg-[#151619] rounded-3xl border border-white/10 p-6">
                   <div className="flex items-center justify-between mb-4">

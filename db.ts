@@ -506,6 +506,7 @@ export const writeSportsFiles = (status: any) => {
     writeAtomic("tennis_points_a.txt", String(status?.tennis_points_a ?? "0"));
     writeAtomic("tennis_points_b.txt", String(status?.tennis_points_b ?? "0"));
     writeAtomic("tennis_server.txt", status?.tennis_server === 'b' ? "B" : (status?.tennis_server === 'none' ? "" : "A"));
+    writeAtomic("tennis_tiebreak.txt", status?.tennis_tiebreak ? "TIE-BREAK" : "");
   } catch (err) {
     console.error("Erro ao gravar arquivos do painel esportivo:", err);
   }
