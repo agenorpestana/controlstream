@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Camera, Video, Play, Square, Settings, Plus, Trash2, LogOut, Activity, Monitor, Upload, Repeat, RefreshCw, Mic, MicOff, Trophy, Pause, RotateCcw, Edit, AlertTriangle, X, Volume2, Radio, Headphones, VolumeX, Sliders, Users, UserPlus, Shield, ShieldAlert, Key, Check, CheckSquare, Laptop, Cast, Lock, UserCheck } from 'lucide-react';
+import { Camera, Video, Play, Square, Settings, Plus, Trash2, LogOut, Activity, Monitor, Upload, Repeat, RefreshCw, Mic, MicOff, Trophy, Pause, RotateCcw, Edit, AlertTriangle, X, Volume2, Radio, Headphones, VolumeX, Sliders, Users, UserPlus, Shield, ShieldAlert, Key, Check, CheckSquare, Laptop, Cast, Lock, UserCheck, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { io } from 'socket.io-client';
 
@@ -253,6 +253,19 @@ export default function App() {
   const [newCam, setNewCam] = useState({ name: '', rtsp_url: '' });
   const [camProtocol, setCamProtocol] = useState<'rtsp' | 'rtmp'>('rtsp');
   const [rtmpStreamKey, setRtmpStreamKey] = useState(() => 'cam_' + Math.random().toString(36).substring(2, 8));
+
+  // Collapsible Sidebar State (Desktop)
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
+    return localStorage.getItem('sidebar_collapsed') === 'true';
+  });
+
+  const toggleSidebar = () => {
+    setIsSidebarCollapsed(prev => {
+      const next = !prev;
+      localStorage.setItem('sidebar_collapsed', String(next));
+      return next;
+    });
+  };
 
   // Current Logged-in User State & Role-Based Access Control
   const [currentUser, setCurrentUser] = useState<UserItem | null>(() => {
@@ -2219,13 +2232,29 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white flex flex-col lg:flex-row font-sans">
       {/* Sidebar */}
-      <aside className="w-full lg:w-64 bg-[#151619] border-b lg:border-r border-white/10 flex flex-col">
-        <div className="p-6 flex items-center gap-3">
-          <Activity className="text-emerald-500 w-6 h-6" />
-          <span className="text-xl font-bold tracking-tight">StreamControl</span>
+      <aside className={`w-full ${isSidebarCollapsed ? 'lg:w-20' : 'lg:w-64'} bg-[#151619] border-b lg:border-r border-white/10 flex flex-col transition-all duration-300 ease-in-out shrink-0 select-none`}>
+        <div className={`p-4 lg:p-5 flex items-center ${isSidebarCollapsed ? 'justify-center lg:flex-col lg:gap-3' : 'justify-between'} border-b border-white/5`}>
+          <div className="flex items-center gap-3 overflow-hidden">
+            <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0 shadow-lg shadow-emerald-500/10">
+              <Activity className="w-5 h-5 text-emerald-400" />
+            </div>
+            {!isSidebarCollapsed && (
+              <span className="text-lg font-bold tracking-tight text-white truncate">
+                StreamControl
+              </span>
+            )}
+          </div>
+          
+          <button
+            onClick={toggleSidebar}
+            className="p-2 rounded-xl text-white/50 hover:text-white hover:bg-white/5 transition-all cursor-pointer hidden lg:flex items-center justify-center"
+            title={isSidebarCollapsed ? "Expandir Menu" : "Recolher Menu"}
+          >
+            {isSidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+          </button>
         </div>
         
-        <nav className="flex-1 px-4 py-4 space-y-2">
+        <nav className="flex-1 px-3 py-4 space-y-1.5 overflow-y-auto">
           {availableTabs.map((tab) => {
             const Icon = tab.icon;
             const isTabActive = activeTab === tab.id;
@@ -2233,40 +2262,58 @@ export default function App() {
               <button 
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id as any)}
-                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all cursor-pointer ${
+                title={isSidebarCollapsed ? tab.label : undefined}
+                className={`w-full flex items-center ${isSidebarCollapsed ? 'justify-center px-2 py-3' : 'gap-3 px-4 py-3 justify-start'} rounded-xl transition-all cursor-pointer group relative ${
                   isTabActive 
-                    ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20' 
-                    : 'text-white/60 hover:bg-white/5 hover:text-white'
+                    ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20 font-semibold' 
+                    : 'text-white/60 hover:bg-white/5 hover:text-white font-medium'
                 }`}
               >
-                <Icon size={20} />
-                <span className="font-medium">{tab.label}</span>
+                <Icon size={20} className="shrink-0" />
+                {!isSidebarCollapsed && (
+                  <span className="truncate">{tab.label}</span>
+                )}
+                {isSidebarCollapsed && (
+                  <span className="sr-only">{tab.label}</span>
+                )}
               </button>
             );
           })}
         </nav>
 
-        <div className="p-4 border-t border-white/10 space-y-3">
-          <div className="bg-black/30 p-3 rounded-xl border border-white/5 flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold text-xs shrink-0">
-              {isSuperAdmin ? <Shield size={16} /> : <Users size={16} />}
+        <div className="p-3 border-t border-white/10 space-y-2">
+          {!isSidebarCollapsed ? (
+            <div className="bg-black/30 p-2.5 rounded-xl border border-white/5 flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold text-xs shrink-0">
+                {isSuperAdmin ? <Shield size={16} /> : <Users size={16} />}
+              </div>
+              <div className="overflow-hidden flex-1">
+                <span className="text-xs font-bold text-white block truncate" title={currentUser?.username}>
+                  {currentUser?.username || 'Operador'}
+                </span>
+                <span className="text-[10px] text-white/40 block font-mono uppercase truncate">
+                  {isSuperAdmin ? 'Super Admin' : currentUser?.role === 'admin' ? 'Administrador' : 'Operador'}
+                </span>
+              </div>
             </div>
-            <div className="overflow-hidden flex-1">
-              <span className="text-xs font-bold text-white block truncate" title={currentUser?.username}>
-                {currentUser?.username || 'Operador'}
-              </span>
-              <span className="text-[10px] text-white/40 block font-mono uppercase">
-                {isSuperAdmin ? 'Super Admin' : currentUser?.role === 'admin' ? 'Administrador' : 'Operador'}
-              </span>
+          ) : (
+            <div 
+              className="w-full flex items-center justify-center p-2 rounded-xl bg-black/30 border border-white/5"
+              title={`${currentUser?.username || 'Operador'} (${isSuperAdmin ? 'Super Admin' : currentUser?.role === 'admin' ? 'Administrador' : 'Operador'})`}
+            >
+              <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold text-xs">
+                {isSuperAdmin ? <Shield size={16} /> : <Users size={16} />}
+              </div>
             </div>
-          </div>
+          )}
 
           <button 
             onClick={handleLogout}
-            className="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-red-400 hover:bg-red-400/10 transition-all text-sm font-medium cursor-pointer"
+            title="Sair do Sistema"
+            className={`w-full flex items-center ${isSidebarCollapsed ? 'justify-center p-2.5' : 'gap-3 px-4 py-2.5'} rounded-xl text-red-400 hover:bg-red-400/10 transition-all text-sm font-medium cursor-pointer`}
           >
-            <LogOut size={18} />
-            <span>Sair</span>
+            <LogOut size={18} className="shrink-0" />
+            {!isSidebarCollapsed && <span>Sair</span>}
           </button>
         </div>
       </aside>

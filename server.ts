@@ -800,12 +800,19 @@ async function startServer() {
   }
 
   const probeCameraHasAudio = async (rtspUrl: string, camId: number | string): Promise<boolean> => {
+    const streamUrl = getInternalStreamUrl(rtspUrl);
+    const isRtmp = streamUrl && (streamUrl.startsWith("rtmp://") || streamUrl.startsWith("rtmps://"));
+
+    // RTMP cameras universally deliver audio stream packets
+    if (isRtmp) {
+      camAudioCache[camId] = true;
+      return true;
+    }
+
     if (camAudioCache[camId] !== undefined) {
       return camAudioCache[camId];
     }
-    const streamUrl = getInternalStreamUrl(rtspUrl);
-    const isRtmp = streamUrl && (streamUrl.startsWith("rtmp://") || streamUrl.startsWith("rtmps://"));
-    const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-stimeout", "1500000"];
+    const transportOpts = ["-rtsp_transport", "tcp", "-stimeout", "3000000"];
 
     return new Promise<boolean>((resolve) => {
       let proc: any = null;
@@ -814,11 +821,14 @@ async function startServer() {
         proc = spawn("ffprobe", [
           ...transportOpts,
           "-v", "error",
+          "-probesize", "1000000",
+          "-analyzeduration", "1000000",
           "-select_streams", "a:0",
           "-show_entries", "stream=codec_type",
           "-of", "default=noprint_wrappers=1",
           streamUrl
         ]);
+        activeProbeProc = proc;
       } catch (e) {
         camAudioCache[camId] = false;
         return resolve(false);
@@ -826,22 +836,25 @@ async function startServer() {
 
       const timer = setTimeout(() => {
         try { proc.kill("SIGKILL"); } catch (e) {}
+        activeProbeProc = null;
         const ok = out.toLowerCase().includes("audio");
         camAudioCache[camId] = ok;
         resolve(ok);
-      }, 900);
+      }, 2500);
 
       if (proc.stdout) {
         proc.stdout.on("data", (d: any) => { out += d.toString(); });
       }
       proc.on("close", () => {
         clearTimeout(timer);
+        activeProbeProc = null;
         const ok = out.toLowerCase().includes("audio");
         camAudioCache[camId] = ok;
         resolve(ok);
       });
       proc.on("error", () => {
         clearTimeout(timer);
+        activeProbeProc = null;
         camAudioCache[camId] = false;
         resolve(false);
       });
@@ -898,7 +911,12 @@ async function startServer() {
         const isRtmp = streamUrl && (streamUrl.startsWith("rtmp://") || streamUrl.startsWith("rtmps://"));
 
         // Fast probe audio presence to avoid FFmpeg fatal filtergraph errors on cameras without mic
-        hasAudio = await probeCameraHasAudio(cam.rtsp_url, cam.id);
+        if (isRtmp) {
+          hasAudio = true;
+          camAudioCache[cam.id] = true;
+        } else {
+          hasAudio = await probeCameraHasAudio(cam.rtsp_url, cam.id);
+        }
         if (cam.has_audio !== hasAudio) {
           cam.has_audio = hasAudio;
           saveDb(db);
@@ -913,8 +931,8 @@ async function startServer() {
           inputArgs.push(
             "-thread_queue_size", "4096",
             "-fflags", "+nobuffer+genpts+discardcorrupt",
-            "-analyzeduration", "500000", 
-            "-probesize", "500000", 
+            "-analyzeduration", "1000000", 
+            "-probesize", "1000000", 
             "-i", streamUrl
           );
         } else {
