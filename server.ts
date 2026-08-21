@@ -129,17 +129,14 @@ if (!getAvailableFontFile()) {
   });
 }
 
-// Narration Audio Streamer (PCM 16-bit 44.1kHz Stereo) with Clean Streaming for Zero Robotic Artifacts
+// Narration Audio Streamer (PCM 16-bit 44.1kHz Stereo) with Continuous Real-Time Streaming
 class NarrationAudioStreamer {
   private clients: ((chunk: Buffer) => void)[] = [];
   private lastChunkTime: number = 0;
-  private ringBuffer: Buffer[] = [];
-  private totalRingBytes: number = 0;
-  private maxRingBytes: number = 35280; // ~200ms of 44.1kHz 16-bit stereo PCM audio
 
   constructor() {
     // Generate silence ONLY if no client chunks have arrived for > 350ms (mic muted or disconnected)
-    // This completely prevents interleaving silence between real voice chunks which was causing robotic sound!
+    // Ensures active FFmpeg process constantly receives 44.1kHz stereo audio at 1x clock rate
     setInterval(() => {
       if (this.clients.length > 0 && Date.now() - this.lastChunkTime > 350) {
         const silenceChunk = Buffer.alloc(3528, 0); // ~40ms silence
@@ -152,15 +149,6 @@ class NarrationAudioStreamer {
     if (!isSilence) {
       this.lastChunkTime = Date.now();
     }
-    
-    // Store in circular buffer for instant priming on camera switch
-    this.ringBuffer.push(buf);
-    this.totalRingBytes += buf.length;
-    while (this.totalRingBytes > this.maxRingBytes && this.ringBuffer.length > 1) {
-      const removed = this.ringBuffer.shift();
-      if (removed) this.totalRingBytes -= removed.length;
-    }
-
     this.broadcast(buf);
   }
 
@@ -175,18 +163,8 @@ class NarrationAudioStreamer {
   }
 
   public subscribe(cb: (chunk: Buffer) => void) {
-    // When a newly spawned FFmpeg process connects during a camera switch,
-    // immediately prime it with clean audio buffer
-    if (this.ringBuffer.length > 0) {
-      for (const chunk of this.ringBuffer) {
-        try {
-          cb(chunk);
-        } catch (e) {}
-      }
-    } else {
-      cb(Buffer.alloc(7056, 0));
-    }
-
+    // When a newly spawned FFmpeg connects, prime it with a small 40ms silence chunk so audio pipe opens immediately
+    cb(Buffer.alloc(3528, 0));
     this.clients.push(cb);
     return () => {
       const idx = this.clients.indexOf(cb);
@@ -803,11 +781,18 @@ async function startServer() {
     if (camAudioCache[camId] !== undefined) {
       return camAudioCache[camId];
     }
+    const db = getDb();
+    const cam = db.cameras.find((c: any) => c.id === camId);
+    if (cam && typeof cam.has_audio === "boolean") {
+      camAudioCache[camId] = cam.has_audio;
+      return cam.has_audio;
+    }
+
     const streamUrl = getInternalStreamUrl(rtspUrl);
     const isRtmp = streamUrl && (streamUrl.startsWith("rtmp://") || streamUrl.startsWith("rtmps://"));
     const transportOpts = isRtmp 
-      ? ["-analyzeduration", "1000000", "-probesize", "1000000"]
-      : ["-rtsp_transport", "tcp", "-stimeout", "3000000", "-analyzeduration", "1000000", "-probesize", "1000000"];
+      ? ["-analyzeduration", "800000", "-probesize", "800000"]
+      : ["-rtsp_transport", "tcp", "-stimeout", "2000000", "-analyzeduration", "800000", "-probesize", "800000"];
 
     return new Promise<boolean>((resolve) => {
       let proc: any = null;
@@ -833,7 +818,7 @@ async function startServer() {
         const ok = out.toLowerCase().includes("audio");
         camAudioCache[camId] = ok;
         resolve(ok);
-      }, 2000);
+      }, 1000);
 
       if (proc.stdout) {
         proc.stdout.on("data", (d: any) => { out += d.toString(); });
@@ -1044,21 +1029,21 @@ async function startServer() {
       const narrationVolume = Math.max(0, (db.stream_status.mic_narration_volume ?? 100) / 100);
 
       if (type === "web") {
-        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else if (narrationInputIndex !== -1) {
         if (db.stream_status.mic_narration_mode === "replace" || !hasAudio) {
           addLog(`[SERVER] ÁUDIO NARRAÇÃO: Transmitindo voz do computador/microfone (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
-          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[a_out]`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[a_out]`);
         } else {
           // "mix" mode with camera that has audio
           addLog(`[SERVER] ÁUDIO MISTO: Misturando som da câmera com microfone do computador (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
-          filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[cam_a]`);
-          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
-          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=first:dropout_transition=0:weights=1 1,aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+          filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[cam_a]`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
+          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=longest:dropout_transition=0:weights=1 1,aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
         }
       } else if (hasAudio) {
         addLog("[SERVER] ÁUDIO DA CÂMERA: Transmitindo som ambiente da câmera IP para o YouTube.\n");
-        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else {
         addLog("[SERVER] ÁUDIO SILENCIOSO: Câmera sem microfone embutido. Gerando áudio silencioso sincronizado para o YouTube.\n");
         filterComplexParts.push(`anullsrc=channel_layout=stereo:sample_rate=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
