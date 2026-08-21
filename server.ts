@@ -1043,21 +1043,21 @@ async function startServer() {
       const narrationVolume = Math.max(0, (db.stream_status.mic_narration_volume ?? 100) / 100);
 
       if (type === "web") {
-        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1:first_pts=0,asetpts=N/SR/TB,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else if (narrationInputIndex !== -1) {
         if (db.stream_status.mic_narration_mode === "replace" || !hasAudio) {
           addLog(`[SERVER] ÁUDIO NARRAÇÃO: Transmitindo voz do computador/microfone (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
-          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[a_out]`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1:first_pts=0,asetpts=N/SR/TB,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[a_out]`);
         } else {
           // "mix" mode with camera that has audio
           addLog(`[SERVER] ÁUDIO MISTO: Misturando som da câmera com microfone do computador (Ganho: ${Math.round(narrationVolume * 100)}%).\n`);
-          filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[cam_a]`);
-          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
-          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=longest:dropout_transition=0:weights=1 1,aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+          filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1:first_pts=0,asetpts=N/SR/TB,aformat=sample_fmts=fltp:channel_layouts=stereo[cam_a]`);
+          filterComplexParts.push(`[${narrationInputIndex}:a]aresample=44100:async=1:first_pts=0,asetpts=N/SR/TB,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${narrationVolume.toFixed(2)}[mic_a]`);
+          filterComplexParts.push(`[cam_a][mic_a]amix=inputs=2:duration=longest:dropout_transition=0:weights=1 1:normalize=0,aresample=44100:async=1:first_pts=0,asetpts=N/SR/TB,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
         }
       } else if (hasAudio) {
         addLog("[SERVER] ÁUDIO DA CÂMERA: Transmitindo som ambiente da câmera IP para o YouTube.\n");
-        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1000,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
+        filterComplexParts.push(`[${mainInputIndex}:a]aresample=44100:async=1:first_pts=0,asetpts=N/SR/TB,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
       } else {
         addLog("[SERVER] ÁUDIO SILENCIOSO: Câmera sem microfone embutido. Gerando áudio silencioso sincronizado para o YouTube.\n");
         filterComplexParts.push(`anullsrc=channel_layout=stereo:sample_rate=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[a_out]`);
