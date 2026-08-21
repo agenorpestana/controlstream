@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Camera, Video, Play, Square, Settings, Plus, Trash2, LogOut, Activity, Monitor, Upload, Repeat, RefreshCw, Mic, MicOff, Trophy, Pause, RotateCcw, Edit, AlertTriangle, X, Volume2, Radio, Headphones, VolumeX, Sliders, Users, UserPlus, Shield, ShieldAlert, Key, Check, CheckSquare, Laptop, Cast, Lock, UserCheck, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { Camera, CameraOff, Video, Play, Square, Settings, Plus, Trash2, LogOut, Activity, Monitor, Upload, Repeat, RefreshCw, Mic, MicOff, Trophy, Pause, RotateCcw, Edit, AlertTriangle, X, Volume2, Radio, Headphones, VolumeX, Sliders, Users, UserPlus, Shield, ShieldAlert, Key, Check, CheckSquare, Laptop, Cast, Lock, UserCheck, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { io } from 'socket.io-client';
 
@@ -1072,25 +1072,42 @@ export default function App() {
           ctx.drawImage(screenVideoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
         }
 
-        // Draw Camera PiP
+        // Draw Camera (Full-Screen or PiP)
         if (cameraStream && cameraVideoRef.current && cameraVideoRef.current.readyState >= 2) {
-          const pipWidth = canvasRef.current.width / 5.2; // Slightly smaller camera frame size (approx 19.2% width instead of 25%)
-          const videoRatio = cameraVideoRef.current.videoHeight / cameraVideoRef.current.videoWidth || 0.75;
-          const pipHeight = videoRatio * pipWidth;
-          let x = 20, y = 20;
+          if (!screenStream) {
+            // Full-screen camera when only webcam is active
+            const cw = canvasRef.current.width;
+            const ch = canvasRef.current.height;
+            const vw = cameraVideoRef.current.videoWidth || 1280;
+            const vh = cameraVideoRef.current.videoHeight || 720;
+            
+            const scale = Math.max(cw / vw, ch / vh);
+            const drawW = vw * scale;
+            const drawH = vh * scale;
+            const drawX = (cw - drawW) / 2;
+            const drawY = (ch - drawH) / 2;
+            
+            ctx.drawImage(cameraVideoRef.current, drawX, drawY, drawW, drawH);
+          } else {
+            // Camera PiP overlay over screen share
+            const pipWidth = canvasRef.current.width / 5.2; // Approx 19.2% width
+            const videoRatio = cameraVideoRef.current.videoHeight / cameraVideoRef.current.videoWidth || 0.75;
+            const pipHeight = videoRatio * pipWidth;
+            let x = 20, y = 20;
 
-          if (pipPosition === 'top-right') x = canvasRef.current.width - pipWidth - 20;
-          if (pipPosition === 'bottom-left') y = canvasRef.current.height - pipHeight - 20;
-          if (pipPosition === 'bottom-right') {
-            x = canvasRef.current.width - pipWidth - 20;
-            y = canvasRef.current.height - pipHeight - 20;
+            if (pipPosition === 'top-right') x = canvasRef.current.width - pipWidth - 20;
+            if (pipPosition === 'bottom-left') y = canvasRef.current.height - pipHeight - 20;
+            if (pipPosition === 'bottom-right') {
+              x = canvasRef.current.width - pipWidth - 20;
+              y = canvasRef.current.height - pipHeight - 20;
+            }
+
+            // Shadow/Border for PiP
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x, y, pipWidth, pipHeight);
+            ctx.drawImage(cameraVideoRef.current, x, y, pipWidth, pipHeight);
           }
-
-          // Shadow/Border for PiP
-          ctx.strokeStyle = '#fff';
-          ctx.lineWidth = 2;
-          ctx.strokeRect(x, y, pipWidth, pipHeight);
-          ctx.drawImage(cameraVideoRef.current, x, y, pipWidth, pipHeight);
         }
 
         // Sports overlay drawing removed from local compositor loop since it is now implemented as an elegant floating HTML element over cameras and commercials in the control panel
@@ -1436,6 +1453,11 @@ export default function App() {
         setStatus({ ...status, is_streaming: true, current_source_type: type, current_source_id: id });
       }
 
+      // If switching away from local web stream to another camera/video, stop local broadcast recorder
+      if (type !== 'web' && isLocalStreamingRef.current) {
+        stopWebBroadcast();
+      }
+
       setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] API respondeu com sucesso.\n`]);
       
       // Se trocamos para web/local, ativamos um gatilho de seguranca
@@ -1551,6 +1573,29 @@ export default function App() {
 
     updateLocalStreaming(true);
     await switchStream('web', 'local');
+  };
+
+  const switchToLocalCamera = async () => {
+    if (!cameraStream) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          video: true, 
+          audio: requestAudioWithCamera 
+        });
+        setCameraStream(stream);
+        stream.getAudioTracks().forEach(track => {
+          track.enabled = isMicEnabled;
+        });
+        updateLocalStreaming(true);
+        await switchStream('web', 'local');
+      } catch (err: any) {
+        console.error("Erro ao acessar câmera do computador:", err);
+        alert("Não foi possível acessar a câmera do computador. Verifique as permissões de vídeo/webcam no seu navegador.");
+      }
+    } else {
+      updateLocalStreaming(true);
+      await switchStream('web', 'local');
+    }
   };
 
   const startActualRecorder = () => {
@@ -2595,11 +2640,8 @@ export default function App() {
                             className="w-full h-full object-contain"
                           />
                         ) : status.current_source_type === 'web' ? (
-                          <div className="w-full h-full flex flex-col items-center justify-center">
-                            <div className="w-full h-full max-h-[90%] relative">
-                               <WebPreviewCanvas sourceCanvas={canvasRef.current} />
-                            </div>
-                            <p className="font-mono text-[10px] text-white/40 mt-2 uppercase tracking-widest">Transmissão Local Ativa</p>
+                          <div className="w-full h-full relative flex items-center justify-center">
+                            <WebPreviewCanvas sourceCanvas={canvasRef.current} />
                           </div>
                         ) : status.current_source_type === 'camera' ? (
                           <div className="w-full h-full relative">
@@ -2651,8 +2693,8 @@ export default function App() {
                           )}
                         </div>
 
-                        {/* Sports Overlay (Placar e Cronômetro) - Only shown for cameras and commercials */}
-                        {status.current_source_type !== 'web' && (isScoreboardEnabled || isTimerEnabled) && (
+                        {/* Sports Overlay (Placar e Cronômetro) */}
+                        {(isScoreboardEnabled || isTimerEnabled) && (
                           <div className="absolute top-4 left-4 z-40 flex items-center select-none scale-[0.3] sm:scale-[0.38] md:scale-[0.45] lg:scale-[0.5] origin-top-left pointer-events-none drop-shadow-lg font-sans">
                             {isScoreboardEnabled && (
                               <div className="flex bg-[#0f1117]/95 border-l-4 border-amber-500 rounded-l-md px-4 py-2 h-[42px] items-center gap-3 w-[280px] sm:w-[320px] md:w-[360px] justify-between">
@@ -2696,6 +2738,142 @@ export default function App() {
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* Card: Câmera do Computador (Webcam Local) */}
+                  {(() => {
+                    const isWebActive = status?.current_source_type === 'web' && Boolean(status?.is_streaming);
+                    return (
+                      <div 
+                        key="local-computer-camera-card" 
+                        onClick={() => {
+                          if (cameraStream) {
+                            switchToLocalCamera();
+                          } else {
+                            startCamera();
+                          }
+                        }}
+                        role="button"
+                        tabIndex={0}
+                        className={`bg-[#151619] rounded-2xl border transition-all overflow-hidden group cursor-pointer select-none active:scale-[0.98] ${
+                          isWebActive 
+                            ? 'border-emerald-500 shadow-lg shadow-emerald-500/10 ring-1 ring-emerald-500/30' 
+                            : 'border-white/10 hover:border-emerald-500/50'
+                        }`}
+                      >
+                        <div className="aspect-video bg-black relative flex items-center justify-center overflow-hidden">
+                          {cameraStream ? (
+                            <video 
+                              ref={(el) => {
+                                if (el && cameraStream && el.srcObject !== cameraStream) {
+                                  el.srcObject = cameraStream;
+                                  el.play().catch(() => {});
+                                }
+                              }}
+                              autoPlay 
+                              playsInline 
+                              muted 
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <div className="flex flex-col items-center justify-center p-6 text-center text-white/30">
+                              <div className="w-12 h-12 rounded-2xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400 mb-2 group-hover:scale-110 transition-transform">
+                                <Laptop size={24} />
+                              </div>
+                              <span className="text-xs font-bold text-white/70">Câmera do Computador</span>
+                              <span className="text-[10px] text-white/40 font-mono mt-0.5">Webcam Local Desativada</span>
+                            </div>
+                          )}
+
+                          {isWebActive && (
+                            <div className="absolute top-3 right-3 bg-red-500 text-white text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider shadow z-10 animate-pulse">
+                              NO AR
+                            </div>
+                          )}
+
+                          <div className="absolute top-3 left-3 bg-black/70 backdrop-blur-md text-white/90 text-[10px] font-mono font-bold px-2.5 py-1 rounded-lg border border-white/10 flex items-center gap-1.5 z-10">
+                            <span className={`w-2 h-2 rounded-full ${cameraStream ? 'bg-purple-400 animate-ping' : 'bg-white/30'}`} />
+                            <span>{cameraStream ? 'WEBCAM PRONTA' : 'WEBCAM LOCAL'}</span>
+                          </div>
+
+                          {cameraStream && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                cameraStream.getTracks().forEach(t => t.stop());
+                                setCameraStream(null);
+                                if (isLocalStreamingRef.current) {
+                                  stopWebBroadcast();
+                                }
+                              }}
+                              title="Desativar Câmera do Computador"
+                              className="absolute bottom-3 right-3 px-2 py-1 rounded-lg bg-black/80 hover:bg-red-500 text-white/70 hover:text-white transition-all text-[10px] font-mono font-bold flex items-center gap-1.5 z-10 backdrop-blur-md border border-white/10"
+                            >
+                              <CameraOff size={12} />
+                              <span>Desligar</span>
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="p-4 flex items-center justify-between">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <h4 className="font-bold text-white text-sm group-hover:text-emerald-400 transition-colors">
+                                Câmera do Computador
+                              </h4>
+                              <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                                LOCAL
+                              </span>
+                            </div>
+                            <p className="text-xs text-white/40 font-mono truncate max-w-[200px] mt-0.5">
+                              {cameraStream ? 'Webcam Integrada / USB HD' : 'Clique para ativar a câmera'}
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            {!cameraStream ? (
+                              <button 
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  startCamera();
+                                }}
+                                className="px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer bg-purple-500/20 text-purple-300 border border-purple-500/30 hover:bg-purple-500 hover:text-white"
+                              >
+                                <Camera size={13} />
+                                <span>Ativar</span>
+                              </button>
+                            ) : (
+                              <button 
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  switchToLocalCamera();
+                                }}
+                                className={`px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer ${
+                                  isWebActive 
+                                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' 
+                                    : 'bg-white/5 text-white/80 border border-white/10 group-hover:bg-emerald-500 group-hover:text-white'
+                                }`}
+                              >
+                                {isWebActive ? (
+                                  <>
+                                    <Activity size={14} className="animate-pulse" />
+                                    <span>Ativo</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Play size={12} fill="currentColor" />
+                                    <span>Trocar</span>
+                                  </>
+                                )}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {cameras.map(cam => {
                     const isActive = status?.current_source_id === cam.id && status.current_source_type === 'camera';
                     return (
