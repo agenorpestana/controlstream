@@ -387,6 +387,11 @@ async function startServer() {
           const broadcaster = getOrCreateBroadcaster(cam.id, cam.rtsp_url);
           broadcaster.addSocketSubscriber();
         }
+      } else {
+        const broadcaster = cameraBroadcasters.get(cId);
+        if (broadcaster?.latestFrame) {
+          socket.emit("cam_frame", { id: cId, frame: broadcaster.latestFrame });
+        }
       }
     });
 
@@ -512,6 +517,7 @@ async function startServer() {
     restartTimer: NodeJS.Timeout | null = null;
     isStarting: boolean = false;
     latestFrame: Buffer | null = null;
+    lastSocketEmitTime: number = 0;
 
     constructor(camId: number, rtspUrl: string) {
       this.camId = camId;
@@ -592,13 +598,27 @@ async function startServer() {
     }
 
     checkIdle() {
+      const db = getDb();
+      const isCurrentSource = db.stream_status?.is_streaming && db.stream_status?.current_source_type === "camera" && Number(db.stream_status?.current_source_id) === this.camId;
+      if (isCurrentSource) {
+        if (this.idleTimer) {
+          clearTimeout(this.idleTimer);
+          this.idleTimer = null;
+        }
+        return;
+      }
+
       if (this.clients.size === 0 && this.socketSubscribers === 0) {
         if (this.idleTimer) clearTimeout(this.idleTimer);
         this.idleTimer = setTimeout(() => {
+          const dbNow = getDb();
+          const isNowSource = dbNow.stream_status?.is_streaming && dbNow.stream_status?.current_source_type === "camera" && Number(dbNow.stream_status?.current_source_id) === this.camId;
+          if (isNowSource) return;
+
           if (this.clients.size === 0 && this.socketSubscribers === 0) {
             this.stopFfmpeg();
           }
-        }, 6000);
+        }, 45000);
       }
     }
 
@@ -671,7 +691,9 @@ async function startServer() {
 
           this.latestFrame = frame;
 
-          if (this.socketSubscribers > 0) {
+          const now = Date.now();
+          if (this.socketSubscribers > 0 && (now - this.lastSocketEmitTime >= 50)) {
+            this.lastSocketEmitTime = now;
             io.to(`cam_${this.camId}`).emit("cam_frame", { id: this.camId, frame });
           }
         }

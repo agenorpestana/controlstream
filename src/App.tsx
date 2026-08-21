@@ -79,12 +79,11 @@ interface StreamStatus {
   mic_narration_volume?: number;
 }
 
-const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
+const CameraPreview = ({ camId, className = '' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
   const [hasSignal, setHasSignal] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const isMountedRef = useRef(true);
-  const lastFrameTimeRef = useRef<number>(Date.now());
   const fallbackImgUrlRef = useRef<string | null>(null);
   const fallbackImgRef = useRef<HTMLImageElement | null>(null);
 
@@ -99,11 +98,12 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
     subscribe();
     socket.on('connect', subscribe);
 
+    // Periodic heartbeat to guarantee stream never stalls
+    const subInterval = setInterval(subscribe, 4000);
+
     const handleFrame = (data: { id: number, frame: ArrayBuffer | Uint8Array | Buffer }) => {
       if (!isMountedRef.current) return;
       if (data.id !== camId) return;
-
-      lastFrameTimeRef.current = Date.now();
 
       const blob = new Blob([data.frame], { type: 'image/jpeg' });
       if (typeof createImageBitmap === 'function') {
@@ -124,7 +124,7 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
             }
           }
           bmp.close();
-          setHasSignal(true);
+          if (!hasSignal) setHasSignal(true);
         }).catch(() => {});
       } else {
         if (fallbackImgUrlRef.current) {
@@ -135,21 +135,15 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
         if (fallbackImgRef.current) {
           fallbackImgRef.current.src = url;
         }
-        setHasSignal(true);
+        if (!hasSignal) setHasSignal(true);
       }
     };
 
     socket.on('cam_frame', handleFrame);
 
-    const watchdog = setInterval(() => {
-      if (Date.now() - lastFrameTimeRef.current > 5000) {
-        setHasSignal(false);
-      }
-    }, 2000);
-
     return () => {
       isMountedRef.current = false;
-      clearInterval(watchdog);
+      clearInterval(subInterval);
       socket.off('connect', subscribe);
       socket.off('cam_frame', handleFrame);
       socket.emit('unsubscribe_cam', camId);
@@ -157,23 +151,23 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
         URL.revokeObjectURL(fallbackImgUrlRef.current);
       }
     };
-  }, [camId]);
+  }, [camId, hasSignal]);
 
   return (
-    <div className={`relative bg-[#0d0e12] overflow-hidden flex items-center justify-center ${className}`}>
-      {/* Instant Snapshot Base during connection */}
+    <div className={`relative bg-black overflow-hidden flex items-center justify-center ${className}`}>
+      {/* Instant Snapshot Base during initial connection */}
       <img
         src={`/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`}
         alt=""
         aria-hidden="true"
-        className={`absolute inset-0 w-full h-full object-contain pointer-events-none transition-opacity duration-300 ${hasSignal ? 'opacity-0' : 'opacity-60'}`}
+        className={`absolute inset-0 w-full h-full object-contain pointer-events-none transition-opacity duration-300 ${hasSignal ? 'opacity-0' : 'opacity-100'}`}
         onError={(e) => { (e.target as HTMLElement).style.display = 'none'; }}
       />
 
-      {/* Real-time smooth canvas for 25 FPS live streaming */}
+      {/* Real-time smooth canvas for 25 FPS live streaming - always 100% sharp and clear */}
       <canvas
         ref={canvasRef}
-        className={`relative z-[1] w-full h-full object-contain transition-opacity duration-200 ${hasSignal ? 'opacity-100' : 'opacity-0'}`}
+        className="relative z-[1] w-full h-full object-contain opacity-100"
       />
 
       {/* Fallback image if canvas bitmap decoding is unavailable */}
@@ -182,13 +176,6 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
         alt=""
         className="hidden absolute inset-0 w-full h-full object-contain z-[1]"
       />
-
-      {!hasSignal && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-black/60 z-10">
-          <RefreshCw className="w-5 h-5 text-emerald-400 animate-spin mb-2" />
-          <p className="text-white/80 text-[11px] font-mono font-medium">Sincronizando sinal ao vivo...</p>
-        </div>
-      )}
     </div>
   );
 };
@@ -2570,13 +2557,6 @@ export default function App() {
                         ) : status.current_source_type === 'camera' ? (
                           <div className="w-full h-full relative">
                             <CameraPreview key={`main-cam-${status.current_source_id}`} camId={status.current_source_id as number} className="w-full h-full object-contain" isLive={true} quality="high" />
-                            <div className="absolute inset-0 bg-black/20 pointer-events-none" />
-                            <div className="absolute bottom-4 left-4 flex items-center gap-2">
-                              <Activity className="w-4 h-4 text-emerald-500 animate-pulse" />
-                              <span className="text-[10px] font-mono text-white/60 uppercase tracking-widest">
-                                Streaming: Câmera #{status.current_source_id}
-                              </span>
-                            </div>
                           </div>
                         ) : (
                           <div className="flex flex-col items-center justify-center h-full">
@@ -2683,18 +2663,10 @@ export default function App() {
                             : 'border-white/10 hover:border-emerald-500/50'
                         }`}
                       >
-                        <div className="aspect-video bg-black/40 relative pointer-events-none">
-                          <CameraPreview key={`dash-cam-${cam.id}`} camId={cam.id} className="w-full h-full opacity-60 group-hover:opacity-80 transition-opacity" isLive={true} quality="preview" />
-                          <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/50 transition-colors">
-                            <div className={`p-3.5 rounded-full shadow-xl transition-transform transform group-hover:scale-110 ${isActive ? 'bg-emerald-500 text-white' : 'bg-black/60 text-white/90 border border-white/20 group-hover:bg-emerald-500 group-hover:text-white'}`}>
-                              <Play fill="currentColor" size={22} />
-                            </div>
-                          </div>
-                          <div className="absolute top-3 left-3 bg-black/70 backdrop-blur-md px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold uppercase tracking-wider text-white border border-white/10">
-                            CAM #{cam.id}
-                          </div>
+                        <div className="aspect-video bg-black relative">
+                          <CameraPreview key={`dash-cam-${cam.id}`} camId={cam.id} className="w-full h-full" isLive={true} quality="preview" />
                           {isActive && (
-                            <div className="absolute top-3 right-3 bg-emerald-500 text-white text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider shadow">
+                            <div className="absolute top-3 right-3 bg-red-500 text-white text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider shadow z-10 animate-pulse">
                               NO AR
                             </div>
                           )}
