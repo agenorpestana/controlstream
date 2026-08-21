@@ -1068,46 +1068,50 @@ export default function App() {
         ctx.fillRect(0, 0, canvasRef.current.width, canvasRef.current.height);
 
         // Draw Screen
-        if (screenStream && screenVideoRef.current && screenVideoRef.current.readyState >= 2) {
-          ctx.drawImage(screenVideoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
+        if (screenStream && screenVideoRef.current && (screenVideoRef.current.readyState >= 1 || screenVideoRef.current.videoWidth > 0)) {
+          try {
+            ctx.drawImage(screenVideoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
+          } catch (e) {}
         }
 
         // Draw Camera (Full-Screen or PiP)
-        if (cameraStream && cameraVideoRef.current && cameraVideoRef.current.readyState >= 2) {
-          if (!screenStream) {
-            // Full-screen camera when only webcam is active
-            const cw = canvasRef.current.width;
-            const ch = canvasRef.current.height;
-            const vw = cameraVideoRef.current.videoWidth || 1280;
-            const vh = cameraVideoRef.current.videoHeight || 720;
-            
-            const scale = Math.max(cw / vw, ch / vh);
-            const drawW = vw * scale;
-            const drawH = vh * scale;
-            const drawX = (cw - drawW) / 2;
-            const drawY = (ch - drawH) / 2;
-            
-            ctx.drawImage(cameraVideoRef.current, drawX, drawY, drawW, drawH);
-          } else {
-            // Camera PiP overlay over screen share
-            const pipWidth = canvasRef.current.width / 5.2; // Approx 19.2% width
-            const videoRatio = cameraVideoRef.current.videoHeight / cameraVideoRef.current.videoWidth || 0.75;
-            const pipHeight = videoRatio * pipWidth;
-            let x = 20, y = 20;
+        if (cameraStream && cameraVideoRef.current && (cameraVideoRef.current.readyState >= 1 || cameraVideoRef.current.videoWidth > 0)) {
+          try {
+            if (!screenStream) {
+              // Full-screen camera when only webcam is active
+              const cw = canvasRef.current.width;
+              const ch = canvasRef.current.height;
+              const vw = cameraVideoRef.current.videoWidth || 1280;
+              const vh = cameraVideoRef.current.videoHeight || 720;
+              
+              const scale = Math.max(cw / vw, ch / vh);
+              const drawW = vw * scale;
+              const drawH = vh * scale;
+              const drawX = (cw - drawW) / 2;
+              const drawY = (ch - drawH) / 2;
+              
+              ctx.drawImage(cameraVideoRef.current, drawX, drawY, drawW, drawH);
+            } else {
+              // Camera PiP overlay over screen share
+              const pipWidth = canvasRef.current.width / 5.2; // Approx 19.2% width
+              const videoRatio = cameraVideoRef.current.videoHeight / (cameraVideoRef.current.videoWidth || 1) || 0.75;
+              const pipHeight = videoRatio * pipWidth;
+              let x = 20, y = 20;
 
-            if (pipPosition === 'top-right') x = canvasRef.current.width - pipWidth - 20;
-            if (pipPosition === 'bottom-left') y = canvasRef.current.height - pipHeight - 20;
-            if (pipPosition === 'bottom-right') {
-              x = canvasRef.current.width - pipWidth - 20;
-              y = canvasRef.current.height - pipHeight - 20;
+              if (pipPosition === 'top-right') x = canvasRef.current.width - pipWidth - 20;
+              if (pipPosition === 'bottom-left') y = canvasRef.current.height - pipHeight - 20;
+              if (pipPosition === 'bottom-right') {
+                x = canvasRef.current.width - pipWidth - 20;
+                y = canvasRef.current.height - pipHeight - 20;
+              }
+
+              // Shadow/Border for PiP
+              ctx.strokeStyle = '#fff';
+              ctx.lineWidth = 2;
+              ctx.strokeRect(x, y, pipWidth, pipHeight);
+              ctx.drawImage(cameraVideoRef.current, x, y, pipWidth, pipHeight);
             }
-
-            // Shadow/Border for PiP
-            ctx.strokeStyle = '#fff';
-            ctx.lineWidth = 2;
-            ctx.strokeRect(x, y, pipWidth, pipHeight);
-            ctx.drawImage(cameraVideoRef.current, x, y, pipWidth, pipHeight);
-          }
+          } catch (e) {}
         }
 
         // Sports overlay drawing removed from local compositor loop since it is now implemented as an elegant floating HTML element over cameras and commercials in the control panel
@@ -1460,18 +1464,9 @@ export default function App() {
 
       setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] API respondeu com sucesso.\n`]);
       
-      // Se trocamos para web/local, ativamos um gatilho de seguranca
-      // caso o evento socket 'server_ready_for_web' nao seja recebido (ex: socket bloqueado/desconectado)
+      // Se trocamos para web/local, iniciamos imediatamente a gravação caso ainda não esteja ativa
       if (type === 'web' && id === 'local') {
-        setTimeout(() => {
-          if (isLocalStreamingRef.current) {
-            const hasStarted = mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive';
-            if (!hasStarted) {
-              setFfmpegLogs(prev => [...prev.slice(-49), "[CLIENTE] Gatilho de segurança: Sinal Socket ausente. Iniciando gravação via fallback de rede...\n"]);
-              startActualRecorder();
-            }
-          }
-        }, 2500);
+        startActualRecorder();
       }
     } catch (error: any) {
       if (error.name === 'AbortError' && switchAbortControllerRef.current !== controller) {
@@ -1576,29 +1571,29 @@ export default function App() {
   };
 
   const switchToLocalCamera = async () => {
-    if (!cameraStream) {
+    let activeStream = cameraStream;
+    if (!activeStream) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ 
+        activeStream = await navigator.mediaDevices.getUserMedia({ 
           video: true, 
           audio: requestAudioWithCamera 
         });
-        setCameraStream(stream);
-        stream.getAudioTracks().forEach(track => {
+        setCameraStream(activeStream);
+        activeStream.getAudioTracks().forEach(track => {
           track.enabled = isMicEnabled;
         });
-        updateLocalStreaming(true);
-        await switchStream('web', 'local');
       } catch (err: any) {
         console.error("Erro ao acessar câmera do computador:", err);
         alert("Não foi possível acessar a câmera do computador. Verifique as permissões de vídeo/webcam no seu navegador.");
+        return;
       }
-    } else {
-      updateLocalStreaming(true);
-      await switchStream('web', 'local');
     }
+    updateLocalStreaming(true);
+    setTimeout(() => startActualRecorder(), 50);
+    await switchStream('web', 'local');
   };
 
-  const startActualRecorder = () => {
+  const startActualRecorder = async () => {
     // Evitar iniciar múltiplos gravadores se já houver um rodando e ativo
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       setFfmpegLogs(prev => [...prev.slice(-49), "[CLIENTE] Ignorando startActualRecorder duplicado (gravador já ativo).\n"]);
@@ -1626,104 +1621,105 @@ export default function App() {
       return;
     }
 
-    // Small extra delay to ensure FFmpeg pipe is fully open
-    setTimeout(async () => {
-      if (!canvasRef.current || !isLocalStreamingRef.current) {
-        setFfmpegLogs(prev => [...prev.slice(-49), "[CLIENTE] ABORTADO no timeout (streaming parado).\n"]);
-        return;
+    setFfmpegLogs(prev => [...prev.slice(-49), "[CLIENTE] Capturando stream do canvas (30 FPS)...\n"]);
+    const canvasStream = canvasRef.current.captureStream(30);
+    const videoTrack = canvasStream.getVideoTracks()[0];
+    const streamTracks: MediaStreamTrack[] = [];
+    if (videoTrack) {
+      streamTracks.push(videoTrack);
+    }
+    
+    // Determine if visual/screen or camera already has a microphone/audio track
+    let audioTrack = screenStream?.getAudioTracks()[0] || cameraStream?.getAudioTracks()[0];
+    
+    // Standalone Mic Fallback: If microphone is enabled but neither screen nor camera provided audio,
+    // request direct microphone stream so the broadcaster can always speak on YouTube!
+    if (!audioTrack && isMicEnabled) {
+      setFfmpegLogs(prev => [...prev.slice(-49), "[SISTEMA] Solicitando acesso ao microfone para a transmissão...\n"]);
+      try {
+        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        standaloneMicStreamRef.current = micStream;
+        audioTrack = micStream.getAudioTracks()[0];
+        if (audioTrack) {
+          audioTrack.enabled = isMicEnabled;
+          setFfmpegLogs(prev => [...prev.slice(-49), "[CLIENTE] Áudio do microfone ativado com sucesso.\n"]);
+        }
+      } catch (e: any) {
+        setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] Falha ao recuperar microfone standalone: ${e.message}\n`]);
       }
-      
-      setFfmpegLogs(prev => [...prev.slice(-49), "[CLIENTE] Capturando stream do canvas (25 FPS)...\n"]);
-      const canvasStream = canvasRef.current.captureStream(25);
-      const videoTrack = canvasStream.getVideoTracks()[0];
-      const streamTracks: MediaStreamTrack[] = [];
-      if (videoTrack) {
-        streamTracks.push(videoTrack);
+    }
+    
+    if (audioTrack) {
+      streamTracks.push(audioTrack);
+    } else {
+      // Create silent audio track if none exists
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const oscillator = ctx.createOscillator();
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      const dst = ctx.createMediaStreamDestination();
+      oscillator.connect(gain);
+      gain.connect(dst);
+      oscillator.start();
+      const silentTrack = dst.stream.getAudioTracks()[0];
+      if (silentTrack) {
+        streamTracks.push(silentTrack);
       }
+    }
+
+    // Combine video and audio tracks from scratch to force browser to include both streams into the MediaRecorder container
+    const combinedStream = new MediaStream(streamTracks);
+    
+    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=h264,opus')
+      ? 'video/webm;codecs=h264,opus'
+      : MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') 
+        ? 'video/webm;codecs=vp8,opus' 
+        : 'video/webm';
       
-      // Determine if visual/screen or camera already has a microphone/audio tract
-      let audioTrack = screenStream?.getAudioTracks()[0] || cameraStream?.getAudioTracks()[0];
-      
-      // Standalone Mic Fallback: If microphone is enabled but neither screen nor camera provided audio,
-      // request direct microphone stream so the broadcaster can always speak on YouTube!
-      if (!audioTrack && isMicEnabled) {
-        setFfmpegLogs(prev => [...prev.slice(-49), "[SISTEMA] Solicitando acesso ao microfone para a transmissão...\n"]);
+    setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] Usando mimeType: ${mimeType}\n`]);
+    setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] Bitrate: 2500kbps (Alta Estabilidade YouTube)\n`]);
+
+    const recorder = new MediaRecorder(combinedStream, {
+      mimeType,
+      videoBitsPerSecond: 2500000,
+      audioBitsPerSecond: 128000
+    });
+
+    recorder.ondataavailable = async (event) => {
+      if (event.data.size > 0 && isLocalStreamingRef.current) {
         try {
-          const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          standaloneMicStreamRef.current = micStream;
-          audioTrack = micStream.getAudioTracks()[0];
-          if (audioTrack) {
-            audioTrack.enabled = isMicEnabled;
-            setFfmpegLogs(prev => [...prev.slice(-49), "[CLIENTE] Áudio do microfone ativado com sucesso.\n"]);
+          const buffer = await event.data.arrayBuffer();
+          chunkQueueRef.current.push(buffer);
+          processChunkQueue();
+          
+          if (Math.random() < 0.1) {
+            setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] Chunk enfileirado: ${event.data.size} bytes (Fila: ${chunkQueueRef.current.length})\n`]);
           }
-        } catch (e: any) {
-          setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] Falha ao recuperar microfone standalone: ${e.message}\n`]);
+        } catch (err: any) {
+          console.error("[CLIENTE] Erro ao processar chunk:", err);
         }
       }
-      
-      if (audioTrack) {
-        streamTracks.push(audioTrack);
-      } else {
-        // Create silent audio track if none exists
-        const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const oscillator = ctx.createOscillator();
-        const gain = ctx.createGain();
-        gain.gain.value = 0;
-        const dst = ctx.createMediaStreamDestination();
-        oscillator.connect(gain);
-        gain.connect(dst);
-        oscillator.start();
-        const silentTrack = dst.stream.getAudioTracks()[0];
-        if (silentTrack) {
-          streamTracks.push(silentTrack);
+    };
+
+    recorder.onstart = () => {
+      setFfmpegLogs(prev => [...prev.slice(-49), "[CLIENTE] MediaRecorder iniciado com sucesso.\n"]);
+    };
+
+    recorder.onerror = (e) => {
+      setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] ERRO NO MediaRecorder: ${e}\n`]);
+    };
+
+    recorder.start(500); // 500ms chunking for zero-latency FFmpeg feed
+    mediaRecorderRef.current = recorder;
+
+    // Immediately flush first header chunk after 80ms
+    setTimeout(() => {
+      try {
+        if (recorder.state === 'recording') {
+          recorder.requestData();
         }
-      }
-
-      // Combine video and audio tracks from scratch to force browser to include both streams into the MediaRecorder container
-      const combinedStream = new MediaStream(streamTracks);
-      
-      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=h264,opus')
-        ? 'video/webm;codecs=h264,opus'
-        : MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') 
-          ? 'video/webm;codecs=vp8,opus' 
-          : 'video/webm';
-        
-      setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] Usando mimeType: ${mimeType}\n`]);
-      setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] Bitrate: 2500kbps (Recomendado pelo YouTube)\n`]);
-
-      const recorder = new MediaRecorder(combinedStream, {
-        mimeType,
-        videoBitsPerSecond: 2500000, // Increased to match YouTube recommendation
-        audioBitsPerSecond: 128000
-      });
-
-      recorder.ondataavailable = async (event) => {
-        if (event.data.size > 0 && isLocalStreamingRef.current) {
-          try {
-            const buffer = await event.data.arrayBuffer();
-            chunkQueueRef.current.push(buffer);
-            processChunkQueue();
-            
-            if (Math.random() < 0.1) {
-              setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] Chunk enfileirado: ${event.data.size} bytes (Fila: ${chunkQueueRef.current.length})\n`]);
-            }
-          } catch (err: any) {
-            console.error("[CLIENTE] Erro ao processar chunk:", err);
-          }
-        }
-      };
-
-      recorder.onstart = () => {
-        setFfmpegLogs(prev => [...prev.slice(-49), "[CLIENTE] MediaRecorder iniciado com sucesso.\n"]);
-      };
-
-      recorder.onerror = (e) => {
-        setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] ERRO NO MediaRecorder: ${e}\n`]);
-      };
-
-      recorder.start(2000); // 2.0-second chunking for superb bandwidth balance and stable keyframes
-      mediaRecorderRef.current = recorder;
-    }, 500);
+      } catch (e) {}
+    }, 80);
   };
 
   const stopWebBroadcast = () => {
@@ -4818,6 +4814,13 @@ export default function App() {
             </div>
           )}
         </AnimatePresence>
+
+        {/* Permanent hidden offscreen video and canvas elements for continuous live capture and compositor */}
+        <div style={{ position: 'fixed', top: -99999, left: -99999, width: 1280, height: 720, pointerEvents: 'none', opacity: 0, overflow: 'hidden', zIndex: -100 }}>
+          <canvas ref={canvasRef} width={1280} height={720} />
+          <video ref={screenVideoRef} autoPlay playsInline muted width={1280} height={720} />
+          <video ref={cameraVideoRef} autoPlay playsInline muted width={1280} height={720} />
+        </div>
       </main>
     </div>
   );

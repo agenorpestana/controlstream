@@ -298,25 +298,15 @@ async function startServer() {
     });
 
     socket.on("web_data", (data) => {
-      const db = getDb();
       const isAlive = ffmpegProcess && !ffmpegProcess.killed && ffmpegProcess.exitCode === null;
-      
-      if (isAlive && db.stream_status.current_source_type === "web") {
-        if (ffmpegProcess!.stdin && ffmpegProcess!.stdin.writable) {
-          try {
-            const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
-            
-            if (Math.random() < 0.05) {
-              const msg = `[SERVER] Recebido chunk web_data via Socket: ${buffer.length} bytes`;
-              console.log(msg);
-            }
-            
-            ffmpegProcess!.stdin.write(buffer, (err) => {
-              if (err) console.error("Erro ao escrever no stdin do FFmpeg (Socket):", err);
-            });
-          } catch (e) {
-            console.error("Erro ao processar chunk web_data (Socket):", e);
-          }
+      if (isAlive && ffmpegProcess!.stdin && ffmpegProcess!.stdin.writable) {
+        try {
+          const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+          ffmpegProcess!.stdin.write(buffer, (err) => {
+            if (err) console.error("Erro ao escrever no stdin do FFmpeg (Socket):", err);
+          });
+        } catch (e) {
+          console.error("Erro ao processar chunk web_data (Socket):", e);
         }
       }
     });
@@ -949,9 +939,9 @@ async function startServer() {
       } else if (type === "web") {
         inputArgs.push(
           "-fflags", "+nobuffer+genpts+discardcorrupt",
-          "-thread_queue_size", "16384",
-          "-probesize", "5M",
-          "-analyzeduration", "5M",
+          "-thread_queue_size", "8192",
+          "-probesize", "1M",
+          "-analyzeduration", "1M",
           "-f", "webm",
           "-i", "pipe:0"
         );
@@ -1173,11 +1163,13 @@ async function startServer() {
       });
 
       if (type === "web") {
+        // Emit immediately and a backup tick at 250ms so browser starts streaming MediaRecorder instantly
+        io.emit("server_ready_for_web");
         setTimeout(() => {
           if (activeStreamSession === thisSessionId) {
             io.emit("server_ready_for_web");
           }
-        }, 2000);
+        }, 250);
       }
 
       ffmpegProcess.on("close", (code) => {
@@ -1228,39 +1220,30 @@ async function startServer() {
       console.log(`[SERVER] Recebido chunk POST: ${req.body?.length || 0} bytes. FFmpeg: ${isAlive}, Type: ${db.stream_status.current_source_type}`);
     }
 
-    if (isAlive && db.stream_status.current_source_type === "web") {
-      if (ffmpegProcess!.stdin && ffmpegProcess!.stdin.writable) {
-        try {
-          const buffer = req.body;
-          if (buffer && buffer.length > 0) {
-            // Check for backpressure
-            const canWrite = ffmpegProcess!.stdin.write(buffer, (err) => {
-              if (err) {
-                console.error("Erro ao escrever no stdin do FFmpeg:", err);
-                if (!res.headersSent) res.status(500).send(`Error writing to FFmpeg: ${err.message}`);
-              } else {
-                if (!res.headersSent) res.status(200).send("OK");
-              }
-            });
-            
-            if (!canWrite) {
-              console.warn("[SERVER] Backpressure detectado no stdin do FFmpeg");
+    if (isAlive && ffmpegProcess!.stdin && ffmpegProcess!.stdin.writable) {
+      try {
+        const buffer = req.body;
+        if (buffer && buffer.length > 0) {
+          ffmpegProcess!.stdin.write(buffer, (err) => {
+            if (err) {
+              console.error("Erro ao escrever no stdin do FFmpeg:", err);
+              if (!res.headersSent) res.status(500).send(`Error writing to FFmpeg: ${err.message}`);
+            } else {
+              if (!res.headersSent) res.status(200).send("OK");
             }
-            return;
-          } else {
-            res.status(400).send("Empty chunk");
-          }
-        } catch (e: any) {
-          console.error("Erro fatal ao escrever no stdin via POST:", e);
-          if (!res.headersSent) res.status(500).send(`Fatal error: ${e.message}`);
+          });
+          return;
+        } else {
+          res.status(400).send("Empty chunk");
           return;
         }
-      } else {
-        res.status(503).send("FFmpeg stdin not ready or pipe closed");
+      } catch (e: any) {
+        console.error("Erro fatal ao escrever no stdin via POST:", e);
+        if (!res.headersSent) res.status(500).send(`Fatal error: ${e.message}`);
         return;
       }
     } else {
-      res.status(400).send(`FFmpeg not running or not in web mode (Alive: ${isAlive})`);
+      res.status(400).send(`FFmpeg not running or stdin not ready (Alive: ${isAlive})`);
       return;
     }
   });
