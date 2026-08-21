@@ -778,21 +778,26 @@ async function startServer() {
   }
 
   const probeCameraHasAudio = async (rtspUrl: string, camId: number | string): Promise<boolean> => {
+    const streamUrl = getInternalStreamUrl(rtspUrl);
+    const isRtmp = streamUrl && (streamUrl.startsWith("rtmp://") || streamUrl.startsWith("rtmps://"));
+
+    // RTMP cameras universally deliver audio stream packets
+    if (isRtmp) {
+      camAudioCache[camId] = true;
+      return true;
+    }
+
     if (camAudioCache[camId] !== undefined) {
       return camAudioCache[camId];
     }
     const db = getDb();
     const cam = db.cameras.find((c: any) => c.id === camId);
-    if (cam && typeof cam.has_audio === "boolean") {
-      camAudioCache[camId] = cam.has_audio;
-      return cam.has_audio;
+    if (cam && cam.has_audio === true) {
+      camAudioCache[camId] = true;
+      return true;
     }
 
-    const streamUrl = getInternalStreamUrl(rtspUrl);
-    const isRtmp = streamUrl && (streamUrl.startsWith("rtmp://") || streamUrl.startsWith("rtmps://"));
-    const transportOpts = isRtmp 
-      ? ["-analyzeduration", "800000", "-probesize", "800000"]
-      : ["-rtsp_transport", "tcp", "-stimeout", "2000000", "-analyzeduration", "800000", "-probesize", "800000"];
+    const transportOpts = ["-rtsp_transport", "tcp", "-stimeout", "3000000", "-analyzeduration", "1500000", "-probesize", "1500000"];
 
     return new Promise<boolean>((resolve) => {
       let proc: any = null;
@@ -818,7 +823,7 @@ async function startServer() {
         const ok = out.toLowerCase().includes("audio");
         camAudioCache[camId] = ok;
         resolve(ok);
-      }, 1000);
+      }, 1500);
 
       if (proc.stdout) {
         proc.stdout.on("data", (d: any) => { out += d.toString(); });
@@ -888,11 +893,20 @@ async function startServer() {
         const streamUrl = getInternalStreamUrl(cam.rtsp_url);
         const isRtmp = streamUrl && (streamUrl.startsWith("rtmp://") || streamUrl.startsWith("rtmps://"));
 
-        // Probe audio presence to avoid FFmpeg fatal filtergraph errors on cameras without mic
-        hasAudio = await probeCameraHasAudio(cam.rtsp_url, cam.id);
-        if (cam.has_audio !== hasAudio) {
-          cam.has_audio = hasAudio;
-          saveDb(db);
+        // RTMP cameras always have audio. For RTSP, probe audio stream.
+        if (isRtmp) {
+          hasAudio = true;
+          camAudioCache[cam.id] = true;
+          if (cam.has_audio !== true) {
+            cam.has_audio = true;
+            saveDb(db);
+          }
+        } else {
+          hasAudio = await probeCameraHasAudio(cam.rtsp_url, cam.id);
+          if (cam.has_audio !== hasAudio) {
+            cam.has_audio = hasAudio;
+            saveDb(db);
+          }
         }
 
         if (thisSessionId !== activeStreamSession) {
