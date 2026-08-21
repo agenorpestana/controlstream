@@ -450,6 +450,18 @@ async function startServer() {
   let activeProbeProc: any = null;
   const camAudioCache: Record<number | string, boolean> = {};
 
+  function getInternalStreamUrl(url: string): string {
+    if (!url) return url;
+    if (url.startsWith("rtmp://") || url.startsWith("rtmps://")) {
+      const db = getDb();
+      const domain = db?.stream_status?.system_domain;
+      if (url.includes("/live/cam_") || url.includes(":1935") || (domain && url.includes(domain)) || url.includes("localhost") || url.includes("centralitl")) {
+        return url.replace(/^rtmps?:\/\/[^/:]+(?::\d+)?\//, "rtmp://127.0.0.1:1935/");
+      }
+    }
+    return url;
+  }
+
   // Broadcaster Multiplexer for Camera MJPEG streams
   // Avoids opening multiple concurrent RTSP connections to the same physical camera
   class CameraMjpegBroadcaster {
@@ -532,7 +544,8 @@ async function startServer() {
       if (this.ffmpegProc || this.isStarting || !this.rtspUrl) return;
       this.isStarting = true;
 
-      const isRtmp = this.rtspUrl && (this.rtspUrl.startsWith("rtmp://") || this.rtspUrl.startsWith("rtmps://"));
+      const streamUrl = getInternalStreamUrl(this.rtspUrl);
+      const isRtmp = streamUrl && (streamUrl.startsWith("rtmp://") || streamUrl.startsWith("rtmps://"));
       const transportOpts = isRtmp 
         ? [] 
         : ["-rtsp_transport", "tcp", "-stimeout", "5000000", "-flags", "+low_delay"];
@@ -544,7 +557,7 @@ async function startServer() {
         ...transportOpts,
         "-probesize", "500000",
         "-analyzeduration", "500000",
-        "-i", this.rtspUrl,
+        "-i", streamUrl,
         "-r", "25",
         "-vf", "scale=720:-1",
         "-an",
@@ -636,7 +649,8 @@ async function startServer() {
     if (camAudioCache[camId] !== undefined) {
       return camAudioCache[camId];
     }
-    const isRtmp = rtspUrl && (rtspUrl.startsWith("rtmp://") || rtspUrl.startsWith("rtmps://"));
+    const streamUrl = getInternalStreamUrl(rtspUrl);
+    const isRtmp = streamUrl && (streamUrl.startsWith("rtmp://") || streamUrl.startsWith("rtmps://"));
     const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-stimeout", "1500000"];
 
     return new Promise<boolean>((resolve) => {
@@ -649,7 +663,7 @@ async function startServer() {
           "-select_streams", "a:0",
           "-show_entries", "stream=codec_type",
           "-of", "default=noprint_wrappers=1",
-          rtspUrl
+          streamUrl
         ]);
       } catch (e) {
         camAudioCache[camId] = false;
@@ -726,7 +740,8 @@ async function startServer() {
         db.stream_status.last_camera_id = id;
         saveDb(db);
 
-        const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
+        const streamUrl = getInternalStreamUrl(cam.rtsp_url);
+        const isRtmp = streamUrl && (streamUrl.startsWith("rtmp://") || streamUrl.startsWith("rtmps://"));
 
         // Fast probe audio presence to avoid FFmpeg fatal filtergraph errors on cameras without mic
         hasAudio = await probeCameraHasAudio(cam.rtsp_url, cam.id);
@@ -746,7 +761,7 @@ async function startServer() {
             "-fflags", "+nobuffer+genpts+discardcorrupt",
             "-analyzeduration", "500000", 
             "-probesize", "500000", 
-            "-i", cam.rtsp_url
+            "-i", streamUrl
           );
         } else {
           inputArgs.push(
@@ -757,7 +772,7 @@ async function startServer() {
             "-fflags", "+nobuffer+genpts+discardcorrupt",
             "-analyzeduration", "500000", 
             "-probesize", "500000", 
-            "-i", cam.rtsp_url
+            "-i", streamUrl
           );
         }
         mainInputIndex = nextInputIndex++;
@@ -1368,7 +1383,8 @@ async function startServer() {
     // Capture new snapshot in background
     cache.isFetching = true;
 
-    const isRtmp = cam.rtsp_url && (cam.rtsp_url.startsWith("rtmp://") || cam.rtsp_url.startsWith("rtmps://"));
+    const streamUrl = getInternalStreamUrl(cam.rtsp_url);
+    const isRtmp = streamUrl && (streamUrl.startsWith("rtmp://") || streamUrl.startsWith("rtmps://"));
     const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-stimeout", "3000000"];
 
     const args = [
@@ -1377,7 +1393,7 @@ async function startServer() {
       ...transportOpts,
       "-probesize", "500000",
       "-analyzeduration", "500000",
-      "-i", cam.rtsp_url,
+      "-i", streamUrl,
       "-vf", "scale=480:-1",
       "-frames:v", "1",
       "-an",
@@ -1896,7 +1912,8 @@ async function startServer() {
       return Promise.resolve(true);
     }
 
-    const isRtmp = rtspUrl.startsWith("rtmp://") || rtspUrl.startsWith("rtmps://");
+    const streamUrl = getInternalStreamUrl(rtspUrl);
+    const isRtmp = streamUrl.startsWith("rtmp://") || streamUrl.startsWith("rtmps://");
     const transportOpts = isRtmp ? [] : ["-rtsp_transport", "tcp", "-stimeout", "1500000"];
     const probeArgs = [
       ...transportOpts,
@@ -1905,7 +1922,7 @@ async function startServer() {
       "-probesize", "400000",
       "-show_entries", "stream=codec_type",
       "-of", "default=noprint_wrappers=1",
-      rtspUrl
+      streamUrl
     ];
 
     return new Promise<boolean>((resolve) => {

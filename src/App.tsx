@@ -67,25 +67,30 @@ interface StreamStatus {
 const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: number, className?: string, isLive?: boolean, quality?: 'high' | 'preview', key?: string | number }) => {
   const token = localStorage.getItem('token');
   const [error, setError] = useState(false);
-  const [imgSrc, setImgSrc] = useState<string>(() => `/api/cameras/${camId}/mjpeg?token=${token}&_t=${Date.now()}`);
-  const [snapshotSrc] = useState<string>(() => `/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
+  const [imgSrc, setImgSrc] = useState<string>('');
   const imgRef = useRef<HTMLImageElement | null>(null);
   const isMountedRef = useRef(true);
-  const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
 
-  const reloadStream = () => {
+  const fetchNextPreview = () => {
     if (!isMountedRef.current) return;
-    setError(false);
-    setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=${quality}&_t=${Date.now()}`);
+    if (quality === 'high') {
+      setError(false);
+      setImgSrc(`/api/cameras/${camId}/mjpeg?token=${token}&quality=high&_t=${Date.now()}`);
+    } else {
+      // For cards preview, use snapshot polling so browser HTTP sockets are never exhausted
+      setImgSrc(`/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`);
+    }
   };
 
   useEffect(() => {
     isMountedRef.current = true;
-    reloadStream();
+    setError(false);
+    fetchNextPreview();
 
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
-        reloadStream();
+        fetchNextPreview();
       } else {
         if (imgRef.current) {
           imgRef.current.src = '';
@@ -95,7 +100,7 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
 
     const handleWindowFocus = () => {
       if (document.visibilityState === 'visible') {
-        reloadStream();
+        fetchNextPreview();
       }
     };
 
@@ -103,8 +108,8 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
     window.addEventListener('focus', handleWindowFocus);
 
     return () => {
-      if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
       isMountedRef.current = false;
+      if (timerRef.current) clearTimeout(timerRef.current);
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('focus', handleWindowFocus);
       if (imgRef.current) {
@@ -114,30 +119,42 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
     };
   }, [camId, quality, token]);
 
+  const handleImgLoad = () => {
+    if (!isMountedRef.current) return;
+    setError(false);
+    if (quality === 'preview') {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => {
+        if (isMountedRef.current) {
+          fetchNextPreview();
+        }
+      }, 1500);
+    }
+  };
+
   const handleManualRetry = () => {
-    reloadStream();
+    fetchNextPreview();
   };
 
   const handleImgError = () => {
     if (!isMountedRef.current) return;
     setError(true);
-    // Automatic retry after 2 seconds in case stream was interrupted during switch
-    if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
-    retryTimeoutRef.current = setTimeout(() => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
       if (isMountedRef.current) {
-        reloadStream();
+        fetchNextPreview();
       }
-    }, 2000);
+    }, 2500);
   };
 
   return (
     <div className={`relative bg-[#0d0e12] overflow-hidden ${className}`}>
       {/* Instant Snapshot Base to prevent black screens during connection */}
       <img
-        src={snapshotSrc}
+        src={`/api/cameras/${camId}/snapshot?token=${token}&_t=${Date.now()}`}
         alt=""
         aria-hidden="true"
-        className="absolute inset-0 w-full h-full object-contain pointer-events-none opacity-80"
+        className="absolute inset-0 w-full h-full object-contain pointer-events-none opacity-60"
         onError={(e) => { (e.target as HTMLElement).style.display = 'none'; }}
       />
 
@@ -158,6 +175,7 @@ const CameraPreview = ({ camId, className = '', quality = 'preview' }: { camId: 
         src={imgSrc} 
         alt={`Camera ${camId}`}
         className="relative z-[1] w-full h-full object-contain"
+        onLoad={handleImgLoad}
         onError={handleImgError}
       />
     </div>
@@ -1428,7 +1446,7 @@ export default function App() {
         return;
       }
       const msg = error.name === 'AbortError' 
-        ? 'A câmera demorou para responder. Tente novamente ou verifique se o sinal RTSP está ativo.' 
+        ? 'A câmera demorou para responder. Verifique se o sinal RTMP/RTSP está ativo e tente novamente.' 
         : `Erro ao conectar: ${error.message}`;
       setOfflineAlert(msg);
       setFfmpegLogs(prev => [...prev.slice(-49), `[CLIENTE] ERRO NA TROCA DE STREAM: ${msg}\n`]);
